@@ -1,0 +1,132 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var dem = ee.Image("MERIT/DEM/v1_0_3"),
+    algaeMap = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/aaatrainclean2T"),
+    regions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/glacierRegionsV16"),
+    vowell = /* color: #d63000 */ee.Geometry.Point([-116.79933130116689, 50.744797870814885]),
+    glacierImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages2/glacierImages2"),
+    algaeElevMasksAsset = ee.Image("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/medianElvAlgaeMasks");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions')
+
+
+var thresh = 0.2
+var minContigArea = 500*500 
+
+var algaeMask  = algaeMap.select('CLASS_PROB').mosaic().gt(thresh).rename('ALGAE').unmask(0,false)
+algaeMask = myFunctions.despeckle(algaeMask, minContigArea) // this will slow down runtime considerably
+algaeMask = algaeMask.unmask(0,false)
+// Map.addLayer(algaeMask, {min:0, max:1})
+// Map.centerObject(vowell, 8)
+
+var glacierMask = glacierImages.mosaic()
+// Map.addLayer(glacierMask,{min:0, max:1}, "glacier Mask")
+
+var rangeList = ['alaskaRange','interiorNorth','interiorSouth','coastNorth','coastSouth']
+regions = regions.filter(ee.Filter.inList('name', rangeList))
+
+
+// compute median elevation 10km per grid cell
+var smallGridScale = 10000 
+var na_albers = myFunctions.makeAeaProj([-100, 65],[50, 70])
+var smallGrid = regions.geometry()
+  .coveringGrid(na_albers, smallGridScale)
+  // .aside(Map.addLayer, {},"10k grid")
+// remove small grid cells with no algae in s2 map
+smallGrid = algaeMask.reduceRegions({
+    collection: smallGrid,
+    reducer: ee.Reducer.sum(), // get the sum of area for each band
+    scale: 50  
+})
+.filter(ee.Filter.gt('sum',100)) // remove grid cells with less algae than would equal one modis grid cell
+.select([]) // remove all properties
+// Map.addLayer(smallGrid)
+
+
+// get median watermelon-snow elevation per grid cell
+// first find the median algae elevation per grid cell
+var medianElvAlgaeFC = dem
+  .updateMask(algaeMask)
+  .reduceRegions({
+    collection: smallGrid,
+    reducer: ee.Reducer.median(),
+    scale: 100,//dem is at this res
+    tileScale: 4
+  })//.aside(Map.addLayer,{},"elev ")
+
+// convert that to an image,,,
+var medianElvAlgaeImage = medianElvAlgaeFC.reduceToImage({
+  properties: ['median'],
+  reducer: ee.Reducer.first()
+}).rename('medianAlgaeElv')
+// .aside(Map.addLayer, {},"median Algae elevation image")
+// print(medianElvAlgaeImage)
+
+// mask the algae above and below the median elevation
+var algaeDem=dem.updateMask(algaeMask)//.aside(Map.addLayer,{},"masked DEM")
+var algaeHigh = algaeDem.gt(medianElvAlgaeImage).rename('HIGH_ALGAE')
+var algaeLow = algaeDem .lt(medianElvAlgaeImage).rename('LOW_ALGAE')//.aside(Map.addLayer)
+var algaeElevationMasks = algaeHigh.addBands(algaeLow)
+
+Export.image.toAsset({
+  image:algaeElevationMasks, 
+  description:"medianElvAlgaeMasks",
+  assetId:"globalSnowAlgae/3_algaeMaps2/medianElvAlgaeMasks",// north america only
+  scale:100,
+  maxPixels:1e13
+})
+
+Map.setOptions('dark',{
+  'dark': [
+    { 'elementType': 'labels', 'stylers': [ { 'visibility': 'off' } ] },
+    { 'elementType': 'geometry', 'stylers': [ { 'color': '#808080' } ] },
+    { 'featureType': 'water',  'stylers': [ { 'color': '#404040' } ] }
+  ]
+})
+
+var algaeHighAsset = algaeElevMasksAsset.select('HIGH_ALGAE')
+var algaeLowAsset = algaeElevMasksAsset.select('LOW_ALGAE')
+Map.addLayer(algaeHighAsset,{min:0, max:1},"high")
+Map.addLayer(algaeLowAsset,{min:0, max:1},"low")
+
+
+// downslope-extended buffer -------------------
+
+var rad = 2000 // how many metres downslope to extend the buffer
+
+var objectId = algaeLowAsset
+  .connectedComponents({
+    connectedness: ee.Kernel.plus(1),
+    maxSize: 1024
+  })
+Map.addLayer(objectId.randomVisualizer())
+// problem: some components are too small, need to remove salt and pepper
+
+// find the minimum elevation per object
+var minElv = objectId
+  .addBands(dem)
+  .reduceConnectedComponents({
+    reducer: ee.Reducer.min(),
+    labelBand: 'labels'
+  }).select('dem').rename('BLOOM_MIN_ELEVATION')
+Map.addLayer(dem,{},"DEM")
+Map.addLayer(minElv, {},"minelv")
+
+// mask dem by min elev
+var minMask = dem.eq(minElv.select('BLOOM_MIN_ELEVATION')).selfMask()
+Map.addLayer(minMask,{min:0, max:1,palette:['white','green']},"min elev point")
+
+// buffer min points
+var buff = minMask.focalMin({radius:rad, units:'meters'}) 
+  .updateMask(glacierMask)
+  .rename('2KM_DOWNSLOPE_MASK')
+  .aside(Map.addLayer, {min:0, max:1,palette:['red','green']},"downslope buffer")
+
+Export.image.toAsset({
+  image:buff, 
+  description:"buff",
+  assetId:"globalSnowAlgae/3_algaeMaps2/downslopeAlgaeMask",// north america only
+  scale:100,
+  maxPixels:1e13
+})
+
+

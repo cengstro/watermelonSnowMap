@@ -1,0 +1,293 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var algaeMapF1 = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/aaatrainclean2T"),
+    glacierImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages/glaciers"),
+    dem = ee.Image("MERIT/DEM/v1_0_3"),
+    bioclim = ee.Image("WORLDCLIM/V1/BIO"),
+    era5 = ee.ImageCollection("ECMWF/ERA5/MONTHLY"),
+    northernHemi = 
+    /* color: #d63000 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[179.813999270558, 86.6223060082405],
+          [179.813999270558, 20.403944122116382],
+          [525.751499270558, 20.403944122116382],
+          [525.751499270558, 86.6223060082405]]], null, false),
+    southernHemi = 
+    /* color: #98ff00 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[118.24491958121803, 10.76596017863693],
+          [118.24491958121803, -76.25787706619887],
+          [349.97024927055804, -76.25787706619887],
+          [349.97024927055804, 10.76596017863693]]], null, false),
+    era5Daily = ee.ImageCollection("ECMWF/ERA5_LAND/DAILY_RAW"),
+    interiorVsMaritime = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/northAmericaInteriorVsMaritimeVectors"),
+    westCoast = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/westCoastVector"),
+    aoi = /* color: #98ff00 */ee.Geometry.Polygon(
+        [[[-143.5800108345951, 61.34567392505297],
+          [-147.0956358345951, 62.095157629623024],
+          [-149.9520811470951, 61.471855892143935],
+          [-152.2372373970951, 59.21139133213353],
+          [-150.7870420845951, 58.84957985519217],
+          [-146.5243467720951, 60.055534709815056],
+          [-135.4061827095951, 57.340176844277195],
+          [-128.9022764595951, 51.76989888872712],
+          [-122.04680770959509, 48.82352317455889],
+          [-119.98137802209509, 50.41763881225406],
+          [-127.62786239709509, 57.60011770138157],
+          [-135.9335264595951, 60.62095589059885],
+          [-137.6473936470951, 60.25236688548078]]]),
+    regions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/glacierRegionsV16"),
+    era_month = ee.ImageCollection("ECMWF/ERA5_LAND/MONTHLY_AGGR");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions');
+var palettes = require('users/gena/packages:palettes');
+// var myregions = ['alaskaRange','interiorSouth','interiorNorth','coastSouth','coastNorth']
+
+var gridScale = 50 // km2
+var imageSampleScale = 1000 // in m
+
+
+// 1 make the algae vector set -----------------------------------------
+var glacierImage = glacierImages.map(function(i){
+  return ee.Image(i.rename('glacier')) // quick fix for incompatible band names
+}).mosaic()
+var glacierMask = glacierImage.unmask()
+var algaeImage = algaeMapF1.mosaic().select('CLASS').selfMask()
+var areaImage = ee.Image.pixelArea().divide(1000*1000) // in km2
+var algaeArea = algaeImage.multiply(areaImage).rename("algae_km2")
+var glacierArea = glacierImage.multiply(areaImage).rename("glacier_km2") 
+var combined = algaeArea.addBands(glacierArea)
+
+var gridNorth = regions
+  .filterBounds(northernHemi)
+  .filter(ee.Filter.neq('name',"greenlandNoSheet"))
+  .geometry()
+  .coveringGrid(myFunctions.proj_wag4, gridScale*1000)
+  // .aside(Map.addLayer,{},"grid north") // working
+  
+var gridSouth = regions
+  .filter(ee.Filter.neq('name',"antarcticaNoSheet")) 
+  .filterBounds(southernHemi)
+  .geometry()
+  .coveringGrid(myFunctions.proj_wag4, gridScale*1000)
+  // .aside(Map.addLayer,{},"grid south") // working
+  
+var fullGrid = gridNorth.merge(gridSouth)
+
+var algaeGridNorth = combined.reduceRegions({
+    collection: gridNorth,
+    reducer: ee.Reducer.sum(), 
+    scale: 50 
+}).filter(ee.Filter.gt('glacier_km2',1))
+
+var algaeGridSouth = combined.reduceRegions({
+    collection: gridSouth,
+    reducer: ee.Reducer.sum(), 
+    scale: 50 
+}).filter(ee.Filter.gt('glacier_km2',1))
+
+// annotate by region
+var spatialFilter = ee.Filter.intersects({
+  leftField: '.geo',
+  rightField: '.geo',
+  maxError: 1000
+});
+var saveAllJoin = ee.Join.saveAll({
+  matchesKey: 'name',
+});
+algaeGridNorth = saveAllJoin.apply(algaeGridNorth, regions, spatialFilter);
+algaeGridNorth = algaeGridNorth.map(function(f) {
+  var joinedFeature = ee.Feature(ee.List(f.get('name')).get(0))
+  return f.set({
+    'name': joinedFeature.get('name'),
+    'subregionOf': joinedFeature.get('subregionOf')
+  })
+})
+
+algaeGridSouth = saveAllJoin.apply(algaeGridSouth, regions, spatialFilter);
+algaeGridSouth = algaeGridSouth.map(function(f) {
+  var joinedFeature = ee.Feature(ee.List(f.get('name')).get(0))
+  return f.set({
+    'name': joinedFeature.get('name'),
+    'subregionOf': joinedFeature.get('subregionOf')
+  })
+})
+// print(algaeGridSouth.first(), "algae grid south first") // working
+
+
+
+
+var mostRecentImage = era_month.sort('system:time_start', false).first()
+var mostRecentDate = mostRecentImage.date().format('YYYY-MM-dd')
+// print(mostRecentDate)
+
+// process covariates ----------------
+dem = ee.Terrain.products(dem) // calculate slope, aspect
+var slopeMask = dem.select('slope').gt(20) 
+var aspectMasked = dem.select('aspect').updateMask(slopeMask).rename('aspect_masked')
+dem = dem.select(['dem','slope','aspect']).addBands(aspectMasked)
+
+bioclim
+
+var jjaEra = era_month
+  .filter(ee.Filter.calendarRange(6,8,'month'))
+  .filter(ee.Filter.calendarRange(2019,2022,'year'))//.aside(print)
+  .mean()
+  .select(['temperature_2m','total_precipitation_sum','surface_pressure'])
+  .rename(['jja_temp','jja_prcp','jja_pres'])//.aside(print)
+
+
+var winterEra = era_month
+  .filter(ee.Filter.calendarRange(11,4,'month'))
+  .filter(ee.Filter.calendarRange(2019,2022,'year'))
+  .mean()
+  .select(['temperature_2m','total_precipitation_sum','surface_pressure'])
+  .rename(['wint_temp','wint_prcp','wint_pres'])
+
+// and for the southern hemisphere...
+var jjaSouthEra = era_month
+  .filter(ee.Filter.calendarRange(12,2,'month'))
+  .filter(ee.Filter.calendarRange(2019,2022,'year'))
+  .mean()
+  .select(['temperature_2m','total_precipitation_sum','surface_pressure'])
+  .rename(['jja_temp','jja_prcp','jja_pres'])
+
+var winterSouthEra = era_month
+  .filter(ee.Filter.calendarRange(5,10,'month'))
+  .filter(ee.Filter.calendarRange(2019,2022,'year'))
+  .mean()
+  .select(['temperature_2m','total_precipitation_sum','surface_pressure'])
+  .rename(['wint_temp','wint_prcp','wint_pres'])
+
+
+var yrs = [2019,2020,2021,2022]
+var snow1 = era_month
+  .select('snow_depth')
+  .filter(ee.Filter.calendarRange(2019,2021,'year'))
+
+var snow2 = ee.ImageCollection.fromImages(yrs.map(function(y){
+  return snow1.filter(ee.Filter.calendarRange(y,y,'year')).max()
+})).mean()
+// print(snow2)
+
+// Map.addLayer(snow2.updateMask(glacierMask), {min:0, max:50, palette:palettes.matplotlib.viridis[7]},"snow depth")
+
+
+
+
+// 3 sample covariates each grid cell -------------------------
+
+// sample per grid cell
+var slope = dem.select('slope')
+
+var covFeatsNorth = jjaEra.aside(print)
+  .addBands(winterEra).aside(print)
+  .addBands(slope).aside(print)
+  // .addBands(snow2)//.aside(print)
+  .updateMask(glacierMask)
+  .reduceRegions({
+    collection: algaeGridNorth,
+    reducer: ee.Reducer.mean(),
+    scale: imageSampleScale
+  })
+print(covFeatsNorth.limit(3))
+var covFeatsSouth = jjaSouthEra
+  .addBands(winterSouthEra)
+  .addBands(slope)
+  // .addBands(snow2)
+  .updateMask(glacierMask)
+  .reduceRegions({
+    collection: algaeGridSouth,
+    reducer: ee.Reducer.mean(),
+    scale: imageSampleScale
+  })
+// print(covFeatsSouth.limit(3))
+
+
+var covFeats = covFeatsNorth.merge(covFeatsSouth)
+// print(covFeats.first()) //times out
+
+Export.table.toDrive({
+  collection: covFeats, 
+  description: "covariates"+gridScale,
+  folder: "covariates",
+  fileFormat: "KML" 
+})
+
+
+
+// distance from coast --------------------------------
+
+var coastGeom = westCoast.geometry()
+
+var smallGridScale = 25
+
+var bc_albers = myFunctions.makeAeaProj([-135, 57],[49, 63])
+
+var northAmericaGrid = regions
+  .filter(ee.Filter.inList('name', ['coastNorth','coastSouth']))
+  .geometry()
+  .coveringGrid(bc_albers, smallGridScale*1000)
+  .map(function(f){
+    var dist = f.distance({'right':coastGeom, 'maxError':500})
+    return f.set('distance', dist.divide(1000).round())
+  })
+// Map.addLayer(northAmericaGrid)
+
+northAmericaGrid = combined.reduceRegions({
+    collection: northAmericaGrid,
+    reducer: ee.Reducer.sum(), 
+    scale: 50 
+}).filter(ee.Filter.gt('glacier_km2',1))
+
+
+var covFeatsCoast = jjaEra
+  .addBands(winterEra)
+  .addBands(snow2)
+  .updateMask(glacierMask)
+  .reduceRegions({
+    collection: northAmericaGrid,
+    reducer: ee.Reducer.mean(),
+    scale: imageSampleScale
+  }).filterBounds(aoi)
+// Map.addLayer(covFeatsCoast)// working
+
+
+Export.table.toDrive({
+  collection: covFeatsCoast, 
+  description: "coastCovsPlusDist"+smallGridScale,
+  folder: "covariates",
+  fileFormat: "KML" 
+})
+
+
+
+// // sample interior vs maritime vectors
+// not run, want to do this as a linear regression
+// var covFeatsIntMar = jjaEra
+//   .addBands(winterEra)
+//   // .addBands(snow2)//.aside(print)
+//   .updateMask(glacierMask)
+//   .reduceRegions({
+//     collection: interiorVsMaritime,
+//     reducer: ee.Reducer.mean(),
+//     scale: imageSampleScale
+//   })
+
+// Export.table.toDrive({
+//   collection: covFeatsIntMar, 
+//   description: "covariatesInteriorMaritime"+gridScale,
+//   folder: "covariates",
+//   fileFormat: "KML" 
+// })

@@ -1,0 +1,230 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var vowell = 
+    /* color: #d63000 */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-116.81248224946974, 50.75365760611353],
+          [-116.81248224946974, 50.74485997035237],
+          [-116.79806269380568, 50.74485997035237],
+          [-116.79806269380568, 50.75365760611353]]], null, false),
+    forestPath = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/2_trainDat/trainclean2_trees"),
+    glacierImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages2/glacierImages2"),
+    regions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/regions_plus_thresholds"),
+    algaeImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/aaatrainclean2T"),
+    thresh = ee.Image("projects/ee-caseyengstrom/assets/globalSnowAlgae/threshImage");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+sanity check using vowell as reduceRegion ROI
+
+6 min for southwestGreenland at tileScale 8
+*/
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions')
+
+var myTileScale = 4// increase as needed 
+var mySubregion = "kamchatka"
+
+/*
+alaskaPeninsula 
+cascades
+brooks
+antarcticaNoSheet 
+newZealand
+caucasus
+coastSouth
+interiorNorth
+interiorSouth
+norwayNorth
+alps
+altai
+
+
+kamchatka
+
+----mem limit exceeded
+iceland    1
+norwaySouth 2
+alaskaRange 1
+coastNorth 
+highMtnAsia 
+andes
+southwestGreenland   8
+southeastGreenland 2
+eastCentralGreenland 4
+westCentralGreenland
+northeastGreenland
+northGreenland
+northwestGreenland
+ellesmere
+baffin
+svalbard
+russianArctic 
+*/
+
+var maxCC = 40 // max allowable cloud cover per image
+var maxSza = 65
+var startYear = 2019
+var endYear = 2022
+var dayInc = 7
+
+
+// export settings
+var res = 50 // resolution of map, in meters
+var myCrs = 'EPSG:4326' 
+
+
+
+var decisionTrees = myFunctions.decodeFeatureCollection(forestPath)	
+var trainedClassifier = ee.Classifier.decisionTreeEnsemble(decisionTrees).setOutputMode('raw')				
+var glacierImage = glacierImages.mosaic()
+var glacierMask = glacierImage.unmask(0)
+// Map.addLayer(glacierMask, {min:0, max:1, palette:['black','white']}, 'glacier mask')
+
+var algaeMask = algaeImages.select('CLASS').mosaic().unmask(0,false)
+Map.addLayer(algaeMask, {min:0, max:1})// whats going in in Kamchatka
+// (1) image filtering ---------------------------
+
+// print(regionName, rangeList)
+var myRegions = regions.filter(ee.Filter.eq('name',mySubregion)).aside(print)
+var roi = myRegions.geometry()
+
+// this function will automatically filter jan-feb for southern hemisphere, otherwise 7-8 for north
+var myS2 = myFunctions.filterS2ForAlgae({
+  roi: roi, 
+  maxCloudCover: maxCC,
+  minSnowPercent: 0.5, 
+  maxSZA: maxSza,
+  startYear: startYear,
+  endYear: endYear
+});
+// print(myS2.sort('system:time_start', false).first().date(), "last image date") // check image date matches hemisphere 
+print(myS2.size(), "n images used in composite")
+
+
+// (2) make mosaics ------------------------------
+
+var millisInWeek = 1000*60*60*24*dayInc;
+var milliList = ee.List.sequence(
+  ee.Date("2019-01-01").millis(), 
+  ee.Date("2022-09-01").millis(), 
+  millisInWeek
+)
+
+var weeklyMosaics = ee.ImageCollection.fromImages(
+  milliList.map(function (milli) {
+    var date = ee.Date(milli);
+    var year = date.format('YYYY')
+    var images = myS2
+      .filterDate(date, date.advance(dayInc,'day')) 
+      .sort('CLOUDY_PIXEL_PERCENTAGE'); // clear images will be on top
+    
+    // if there are images in the specified date range, add the mosaic to the collection, 
+    return ee.Algorithms.If(images.size().neq(0), images.mosaic().set('year',year));
+}));
+// print(weeklyMosaics.first().get('year'), "mosaic: year property present?")
+
+
+// (3) Classify weekly mosaics ------------------------
+
+var classifiedImages = weeklyMosaics.map(function(image){
+  var plusNDs = myFunctions.addNormalizedBands(image); // feature engineering for classifier
+  var maskedImage = plusNDs.updateMask(algaeMask); // within the algae mask
+
+  // apply the classifier
+  var raw = maskedImage.classify(trainedClassifier, 'raw');
+  var probability = raw.arrayReduce(ee.Reducer.mean(), ee.List([0])).arrayGet(0).rename('CLASS_PROB')	// per pixel probability
+  var klass = probability.gt(thresh).rename('CLASS')
+  return klass.set('year',image.get('year'))
+});
+// print(classifiedImages.limit(2))
+// print(classifiedImages.limit(2).filter(ee.Filter.eq('year',"2019") ))
+// Map.addLayer(classifiedImages.first())
+
+
+// (4) make a count composite ----------------
+var years = ee.List(["2019","2020","2021","2022"])
+var annComposites = ee.ImageCollection.fromImages(
+  years.map(function(y){
+    var thisYearsImages = classifiedImages.filter(ee.Filter.eq('year',y))
+    return thisYearsImages.max().set('year',y) // whether of not a bloom occurred this year at a given pixel
+  })
+)
+// Map.addLayer(annComposites.first())
+// print(annComposites)
+var count = annComposites.sum().rename('N_YRS').float()// cast as float to allow for higher pyramid level aggregation
+// print(count)
+// Map.addLayer(count)
+
+
+
+// (5) compute relative area --------------------------------
+
+var stats = count
+  .reduceRegion({
+    geometry: roi, 
+    reducer: ee.Reducer.frequencyHistogram(),
+    crs: myCrs,
+    scale:res,
+    maxPixels: 1e13,
+    tileScale:myTileScale // avoid memory limit error
+    // bestEffort: true // increase scale to allow computation to succeed
+  })
+
+print(stats) // dictionary
+
+
+  
+// (7) export ----------------------------  
+  
+var bn = mySubregion
+Export.table.toDrive({
+  collection: ee.FeatureCollection(ee.Feature(null, stats)),
+  description: bn,
+  folder: 'freq_histograms',
+  fileNamePrefix: bn,
+  selectors:['N_YRS']
+})
+
+// scratch -----------------------------
+
+// // on the fly trees
+// var trainingData = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/2_trainDat/"+trainingDataFilename);
+// var classifier = ee.Classifier.smileRandomForest({
+//     numberOfTrees: 500, 
+//     variablesPerSplit: 3,
+//     minLeafPopulation: 2, 
+//     seed: my_seed
+// }).setOutputMode('PROBABILITY')
+// var my_bands = ["ND2_1","ND5_2","ND5_3","ND6_2","ND4_2","ND2_8A","ND2_9",
+// "ND5_6","ND4_8","ND2_7","ND5_4","ND6_3","ND2_8","ND4_6","ND2_11","ND2_12",
+// "GBND","NDSI","RGND",
+// "B1","B2","B3","B4","B5","B6","B7","B8","B8A","B9","B11","B12"]
+// var trainedClassifier = classifier.train(trainingData, 'CLASS', my_bands);
+
+  
+  // using on the fly trees
+  // var probability = maskedImage.classify(trainedClassifier, 'CLASS_PROB');
+  
+
+  // .map(function(i){ // remove images with low % cover of ROI
+  //   var intersection = i.geometry().intersection(roi)
+  //   return i.set("area_in_roi",intersection.area(1000))
+  // }).filter(ee.Filter.gt("area_in_roi", area_in_roi))
+  
+  // set the projection to match the input image
+// var myPrj = myS2.first().select("B2").projection()
+// var myCrs = myPrj.crs().getInfo()
+
+
+    // var dateProperties = {
+    //     'date': date.format("YYYY-MM-dd"), 
+    //     'milli':milli
+    //   };.set(dateProperties)
+    
+    // var hrs = ee.Number(milli).divide(1000).divide(3600).toInt() // convert millis to hrs since unix epoch
+    // var hrsImage = ee.Image.constant(hrs).toInt32().rename('hrs')
+    // .addBands(hrsImage)
+    // var composite = classifiedImages.qualityMosaic('CLASS_PROB') // including the date of the maximum probability

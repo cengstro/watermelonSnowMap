@@ -1,0 +1,307 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var algaeMap = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/aaaatrainclean2F05"),
+    glacierUidImageCollection = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages/uidGlaciers"),
+    glims = ee.FeatureCollection("GLIMS/current"),
+    regions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/glacierRegionsV14"),
+    glacierImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages/glaciers");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+Generate spreadsheets of random validation pts for given ROIs
+Export area/decile stats per region, and glacier
+*/
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions');
+var palettes = require('users/gena/packages:palettes');
+
+
+
+
+// define ROIs for area calculation
+var roisID = "antarcticaNoSheet_trainclean2F05"
+// Map.addLayer(glims.filter(ee.Filter.gt('db_area',1)), {}, "glims")
+
+
+// random point sampling args
+var ptRoi = regions.filter(ee.Filter.eq('name','coastNorth')) // get points for this roi
+var minPointDist = 500 //m, ensure small sample areas are not over-represented in the training data
+var myScale = 10 // used for stratified sampling
+var seed = 3; 
+var nPts = 20 // per class
+
+
+
+
+// get area estimates per decile, region --------------------------------------
+
+// // decile areas ----------------------------------
+
+// var decileImage = algaeImage.select('CLASS_PROB').multiply(10).toInt8().rename('decile') 
+//   // .aside(Map.addLayer, {min:0, max:10, palette:palettes.matplotlib.viridis[7]}, "decile")
+  
+// var decileAreas = ee.List(decileImage.addBands(ee.Image.pixelArea()).reduceRegions({
+//   reducer: ee.Reducer.sum().unweighted().group(),
+//   collection: regions,
+//   scale:30//,
+//   // maxPixels:1e13
+// }).get('groups')); 
+
+// var decileAreasList = decileAreas.map(function (pair) {
+//   pair = ee.Dictionary(pair)
+//   var group = pair.get('group')
+//   var sum = ee.Number(pair.get('sum')).divide(1000*1000).toInt() // convert to km2
+//   return ee.Feature(null, {"group":group,"sum_km2":sum});
+// });
+
+// // helper function to get the summed area of each decile in the image
+// function getSum(decile){
+//   var ll = decileAreasList.filter(ee.Filter.eq('group',decile))
+//   return ee.Algorithms.If(ll, ee.Feature(ll.get(0)).get('sum_km2'), 0) // handle decileAreasList elt is empty
+// }
+
+// // export this data
+
+
+Map.addLayer(glims.filter(ee.Filter.gt('db_area',1)))
+// algaeMap.aggregate_array('n_images').aside(print) // 81,527 
+
+var algaeImage = algaeMap.mosaic()
+Map.addLayer(algaeImage.select('CLASS'),{min:0, max:1, palette:['white','red']}, "algae classification") 
+Map.addLayer(algaeImage.select('CLASS_PROB'),{min:0,max:1,palette:palettes.matplotlib.viridis[7]}, "algae probability") 
+
+var glacierImage = glacierImages
+  .map(function(i){ // hack to deal with incompatible band names (to do correct in original dataset)
+    return ee.Image(i.rename('glacier')) 
+  }).mosaic()
+
+var areaImage = ee.Image.pixelArea().divide(1000*1000) // in km2
+var glacierAreaImage = glacierImage.multiply(areaImage).rename('glacier')
+var algaeAreaImage = algaeImage.select('CLASS').multiply(areaImage).rename('algae')
+var redMaskAreaImage = algaeImage.select('CLASS_PROB').gte(0) // ie the unmasked portion of the image
+  .multiply(areaImage).rename('redmask')
+
+var algalCover = glacierAreaImage
+  .addBands(algaeAreaImage)
+  .addBands(redMaskAreaImage)
+  .reduceRegions({
+    collection: regions,
+    reducer: ee.Reducer.sum(),
+    scale:50,
+    crs:'EPSG:4236',
+    tileScale: 1
+  })
+// print(algalCover)
+
+// Export.table.toDrive({
+//   collection: algalCover,
+//   description: roisID + "area", 
+//   folder: "area", 
+//   fileNamePrefix: roisID,
+//   fileFormat: 'KML' // include geometry so I can filter validation points to compute region specific error
+// })
+
+
+
+
+
+
+// Generate random points in algae map --------------------------------
+
+// mapped functions cannot contain client-side operations
+// do this manually for each region
+
+
+// stratified sample by probability decile
+
+var randomPoints = algaeImage 
+  .stratifiedSample({
+    numPoints: nPts,
+    classBand: 'CLASS',
+    scale:myScale,
+    region: ptRoi.geometry(),
+    seed: seed, 
+    geometries: true
+  })
+
+// filter out points that are too close together  
+randomPoints = myFunctions.filterDistance(randomPoints, minPointDist);  
+
+// add indices  
+var nPts = randomPoints.size()
+var ptList = randomPoints.toList(nPts)
+var ll = ee.List.sequence(0,nPts.subtract(1))
+randomPoints = ee.FeatureCollection(ll.map(function(i){
+  var feat = ee.Feature(ptList.get(i))
+  return feat.set("a_id",i) // prefix "a" so it is the first column in the spreadsheet
+}))
+.sort('a_id', false)// want to look at imgs w algae first
+
+
+// save the points as an asset
+var roiName = ptRoi.get('region').getInfo()
+var exportID = roiName + "_R50_trainclean2F05_" + String(seed)
+var assetPath = "globalSnowAlgae/4_randomPoints/" + exportID
+// Export.table.toAsset({
+//   collection: randomPoints, 
+//   description: exportID, 
+//   assetId: assetPath
+// })
+
+// export the random points to Drive, with added empty columns to CSV for filling out in Sheets 
+var ptsForExport = randomPoints
+  .map(function(f){
+    return f.set({
+      "a_true_class": "", 
+      "b_date_of_true_class":"",
+      "d_notes":"",
+      "c_training_image":""
+    })
+  })
+// print(ptsForExport)
+
+// Export.table.toDrive({
+//   collection: ptsForExport,
+//   description: exportID + "toDrive", 
+//   folder: "random_pt_accuracy_labelled", 
+//   fileNamePrefix: exportID
+// })
+
+
+
+
+// glacier stats ------------------------
+
+
+var uidGlacierImage = glacierUidImageCollection.mosaic()
+var algaeMask = algaeMap.select('CLASS').mosaic()
+var bloomUid = uidGlacierImage.updateMask(algaeMask) // the algae mask, labelled by glacier ID
+var myRegions = regions
+  .filter(ee.Filter.neq('name','greenlandNoSheet'))
+  .filter(ee.Filter.neq('name','antarcticaNoSheet'))
+
+// var nglaciers = bloomUid
+//   .reduceRegions({
+//     collection:myRegions,
+//     reducer: ee.Reducer.countDistinct(),
+//     scale: 100// reduce resolution to ignore isolated pixels
+//   })
+// Export.table.toDrive({
+//   collection: nglaciers,
+//   description: "n_glaciers_w_algae_per_region100", 
+//   folder: "area", 
+//   fileNamePrefix: "n_glaciers_w_algae_per_region100"
+// })
+
+
+// count algae pixels per glacier: 
+var algaeHist = bloomUid.reduceRegions({
+  collection: myRegions,
+  reducer: ee.Reducer.frequencyHistogram(),
+  scale:50 //250 m2
+})
+Export.table.toDrive({
+  collection: algaeHist,
+  description: "algae_pix_count_per_glacier", 
+  folder: "area", 
+  fileNamePrefix: "algae_pix_count_per_glacier"
+})
+
+var glacierHist = uidGlacierImage.reduceRegions({
+  collection: myRegions,
+  reducer: ee.Reducer.frequencyHistogram(),
+  scale:50 //250 m2
+})
+Export.table.toDrive({
+  collection: glacierHist,
+  description: "glacier_pix_count", 
+  folder: "area", 
+  fileNamePrefix: "glacier_pix_count"
+})
+
+
+
+
+// // scratch ------
+
+
+// // include columns for decile area also per region
+
+
+// var decileAreas = ee.List(decileImage.addBands(ee.Image.pixelArea()).reduceRegion({
+//   reducer: ee.Reducer.sum().unweighted().group(),
+//   geometry: roi,
+//   scale:30,
+//   maxPixels:1e13
+// }).get('groups')); 
+
+// var decileAreasList = decileAreas.map(function (pair) {
+//   pair = ee.Dictionary(pair)
+//   var group = pair.get('group')
+//   var sum = ee.Number(pair.get('sum')).divide(1000*1000).toInt() // convert to km2
+//   return ee.Feature(null, {"group":group,"sum_km2":sum});
+// });
+
+// // helper function to get the summed area of each decile in the image
+// function getSum(decile){
+//   var ll = decileAreasList.filter(ee.Filter.eq('group',decile))
+//   return ee.Algorithms.If(ll, ee.Feature(ll.get(0)).get('sum_km2'), 0) // handle decileAreasList elt is empty
+// }
+
+// var areaDict = {
+//   "algae_area": algaeArea,
+//   "glacier_area": glacierArea,
+//   "percent": pct,
+//   "d0_km2":getSum(0), 
+//   "d1_km2":getSum(1),
+//   "d2_km2":getSum(2),
+//   "d3_km2":getSum(3),
+//   "d4_km2":getSum(4),
+//   "d5_km2":getSum(5),
+//   "d6_km2":getSum(6),
+//   "d7_km2":getSum(7),
+//   "d8_km2":getSum(8),
+//   "d9_km2":getSum(9)
+// }
+
+
+
+
+//       // "despeckler_min_area_m2": minArea,
+
+
+
+
+
+// var rangeList = ee.String(probability.get('ranges')).decodeJSON()
+
+// // CHANGE THIS
+// var roi = regions.filter(ee.Filter.inList('range',rangeList)).geometry() // the rectangle containing the image
+//   .aside(Map.addLayer,{},"ROI")
+
+
+
+
+
+
+
+// // print the number of random points 
+// var nPts = randomPoints.size();
+// var nRandomPtsLabel = ui.Label("found " + nPts.getInfo() + " random pts in algae image");
+// print(nRandomPtsLabel);
+
+
+// mask small patches of red snow
+// var minArea = 30*30*10 // low pass filter, min area threshold (smaller patches are masked out)
+// var redSnowMask = probability.gt(0)
+// var areaImage = myFunctions.objectArea(redSnowMask)
+// var smallPatches = areaImage.gt(minArea) 
+// probability = probability.updateMask(smallPatches)
+// Map.addLayer(probability, {palette:palettes.matplotlib.viridis[7]}, "algae prob")
+
+// // mask small patches of pred algae 
+// var algaeMask = probability.gt(0.5).unmask().selfMask().toInt()
+// // Map.addLayer(algaeMask,{},"algaemask")
+// var algaeAreaImage = myFunctions.objectArea(algaeMask)
+// var smallAlgaePatches= algaeAreaImage.lt(minArea).unmask().not()
+// probability = probability.updateMask(smallAlgaePatches)
+// // Map.addLayer(probability,{},"prob algae masked")
+
+//var map_version = Number(algaeImage.slice(-1))

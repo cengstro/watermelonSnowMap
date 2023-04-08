@@ -1,0 +1,95 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var algaeMap = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/aaatrainclean2T"),
+    annualMaps = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps3/annualMaxCompsThresh02"),
+    glacierImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages/glaciers"),
+    maritimeInteriorVectors = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/northAmericaInteriorVsMaritimeVectors"),
+    era5 = ee.ImageCollection("ECMWF/ERA5/MONTHLY");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+quantify algal cover on either side of the dividing range in AK range and pacific coast ranges
+compare cloudmask on either side of the range
+*/
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions');
+var palettes = require('users/gena/packages:palettes');
+
+var glacierImage = glacierImages.map(function(i){
+  return ee.Image(i.rename('GLACIER')) // quick fix for incompatible band names
+}).mosaic()
+var glacierMask = glacierImage.unmask()
+var algaeImage = algaeMap.mosaic().select('CLASS').selfMask()
+var areaImage = ee.Image.pixelArea().divide(1000*1000) // in km2
+var algaeArea = algaeImage.multiply(areaImage).rename("ALGAE_KM2")
+var glacierArea = glacierImage.multiply(areaImage).rename("GLACIER_KM2") 
+var meanMass = annualMaps.map(function(i){
+  return i.select('ALGAL_RGND').unmask()
+}).mean() // composite
+.updateMask(glacierImage) // in case we want to do any mean stats later (sum only so far)
+.rename('MEAN_RGND')
+var combined = algaeArea.addBands(glacierArea).addBands(meanMass)
+
+// do this in separate stages, although slower, to control the resolution at each step
+var maritimeInteriorAlgaeArea = combined.reduceRegions({
+  reducer:ee.Reducer.sum(),
+  collection:maritimeInteriorVectors,
+  scale:50
+})
+
+
+// compare cloud cover wet vs dry side ----------------------------------
+// could the reason for the low algae cover on the coast be due to cloud cover?
+
+var myS2 = myFunctions.filterS2ForAlgae({
+  roi: maritimeInteriorVectors.geometry(1000), 
+  startMonth: 7,
+  endMonth: 8,
+  maxCloudCover: 40,
+  maxSZA: 80,
+});
+var millisInWeek = 1000*60*60*24*7;
+var milliList = ee.List.sequence(
+  ee.Date('2019-07-01').millis(), 
+  ee.Date('2022-09-01').millis(), 
+  millisInWeek
+)
+var weeklyMosaics = ee.ImageCollection.fromImages(
+  milliList.map(function (milli) {
+    var date = ee.Date(milli);
+    var images = myS2
+      .filterDate(date, date.advance(7,'day')) 
+      .sort('CLOUDY_PIXEL_PERCENTAGE', false); // clear images will be on top
+    
+    var dateProperties = {
+        'date': date.format("YYYY-MM-dd"), 
+        'milli':milli
+      };
+    // if there are images in the specified date range, add the mosaic to the collection, 
+    return ee.Algorithms.If(images.size().neq(0), images.mosaic().set(dateProperties));
+}));
+
+// approach: make a cloud-count composite image
+// and compare averages on the interior and maritime sides
+var cloudProbThresh = 10 // same as in 03_makeAlgaeMap
+var cloudCountComposite = weeklyMosaics.select('MSK_CLDPRB')
+  .map(function(i){ return i.gt(cloudProbThresh) }) // 1 if cloud, 0 if not
+  .sum() // the number of cloudy observations
+  .updateMask(glacierImage)
+  .rename('CLOUD_COUNT')
+
+var cccTable = cloudCountComposite.reduceRegions({
+  collection: maritimeInteriorAlgaeArea,
+  reducer: myFunctions.myMeanReducer,
+  scale:1000
+})
+
+Export.table.toDrive(cccTable, "interiorVsMaritime", "area")
+
+
+var jjEra = era5
+  .filter(ee.Filter.calendarRange(2019,2022,'year'))
+  .filter(ee.Filter.calendarRange(6,7,'month'))
+  .select(['maximum_2m_air_temperature'])
+  .mean()
+
+
+// a
+

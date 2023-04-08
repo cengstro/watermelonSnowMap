@@ -1,0 +1,511 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var algaeMapF1 = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/aaatrainclean2T"),
+    regions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/glacierRegionsV16"),
+    glacierImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages2/glacierImages2");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+export map kml data
+
+*/
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions');
+var palettes = require('users/gena/packages:palettes');
+// var regions = ee.FeatureCollection([alaskaRange,interiorSouth,interiorNorth,coastSouth,coastNorth])
+
+
+
+// algaeImages.reduceColumns(ee.Reducer.sum(), ['n_images']).aside(print) //158995 the total n images used to create algal range map
+
+
+var glacierImage = glacierImages.mosaic()
+var glacierMask = glacierImage.unmask(0,false)
+var algaeImage = algaeMapF1.mosaic().select('CLASS').selfMask()
+var areaImage = ee.Image.pixelArea().divide(1000*1000) // in km2
+
+
+// Export KML data for maps -----------------------------------------
+
+var worldGridScale = 50
+
+var algaeArea = algaeImage.multiply(areaImage).rename("algae_km2")
+var glacierArea = glacierImage.multiply(areaImage).rename("glacier_km2") 
+var combined = algaeArea.addBands(glacierArea)
+Map.addLayer(algaeArea,{},"algae")
+Map.addLayer(glacierArea,{},"glacier")
+Map.addLayer(combined,{},"both")
+
+// add grid, in equal area projection
+var grid = regions.geometry()
+  .coveringGrid(myFunctions.proj_wag4, worldGridScale*1000) //set export grid cell resolution here
+// Map.addLayer(grid,{}, "grid")
+
+var worldGridVals = combined.reduceRegions({
+  collection: grid,
+  reducer: ee.Reducer.sum(), 
+  scale: 50  
+})
+.filter(ee.Filter.gt('glacier_km2',1)) // remove grid cells with no glaciers
+// print(worldGridVals.first())
+
+Export.table.toDrive({
+  collection: worldGridVals, 
+  description: "worldAlgaeMap"+worldGridScale,
+  folder: "area",
+  fileFormat: "KML" 
+})
+
+
+
+
+// north america ---------
+
+var smallGridScale = 10
+
+var bc_albers = myFunctions.makeAeaProj([-135, 57],[49, 63])
+// var na_albers = myFunctions.makeAeaProj([-100, 65],[50, 70])
+// var bc2 = myFunctions.makeAeaProj([-135, 57],[50, 70])
+
+var northAmericaGrid = regions
+  .filter(ee.Filter.eq('subregionOf','northAmerica')).geometry()
+  .coveringGrid(bc_albers, smallGridScale*1000)
+
+// get map values per grid cell
+var northAmericaGridVals = combined.reduceRegions({
+    collection: northAmericaGrid,
+    reducer: ee.Reducer.sum(), 
+    scale: 50  
+})
+.filter(ee.Filter.gt('glacier_km2',1))
+// .limit(10).aside(print)
+
+Export.table.toDrive({
+  collection: northAmericaGridVals, 
+  description: "northAmericaAlgaeMap"+smallGridScale,
+  folder: "area",
+  fileFormat: "KML" 
+})
+
+
+// greenland -------------
+
+
+var gris_albers = myFunctions.makeAeaProj([-33, 66], [60, 75])
+// var gr2 = myFunctions.makeAeaProj([-33, 66],[50, 70])
+
+// add grid, in equal area projection
+var grisGrid = regions
+  .filter(ee.Filter.inList('subregionOf',['greenland', 'europe'])) // include iceland
+  .geometry()
+  .coveringGrid(gris_albers, smallGridScale*1000)
+// Map.addLayer(grisGrid,{}, "grid")
+
+// get map values per grid cell
+var greenlandGridVals = combined.reduceRegions({
+    collection: grisGrid,
+    reducer: ee.Reducer.sum(),
+    scale: 50  
+})
+.filter(ee.Filter.gt('glacier_km2',1)) 
+// Map.addLayer(greenlandGridVals,{}, "gris grid")
+
+Export.table.toDrive({
+  collection: greenlandGridVals, 
+  description: "greenlandAlgaeMap"+smallGridScale,
+  folder: "area",
+  fileFormat: "KML"
+})
+
+
+// high mtn asia -------------------------
+
+var hma_albers = myFunctions.makeAeaProj([89, 38], [25, 50])
+var hmaGrid = regions
+  .filter(ee.Filter.inList('subregionOf',['highMtnAsia'])) // include iceland
+  .geometry()
+  .coveringGrid(hma_albers, 20*1000)
+
+// get map values per grid cell
+var hmaGridVals = combined.reduceRegions({
+    collection: hmaGrid,
+    reducer: ee.Reducer.sum(),
+    scale: 50  
+})
+.filter(ee.Filter.gt('glacier_km2',1)) 
+Map.addLayer(hmaGridVals,{}, "HMA grid")
+
+Export.table.toDrive({
+  collection: hmaGridVals, 
+  description: "hmaAlgaeMap20",
+  folder: "area",
+  fileFormat: "KML"
+})
+
+//scratch -------------------------
+
+// // Per glacier algal %------------------------------------------------------------------
+
+
+// // var range = 'norway'//'svalbard'
+// //'southeastGreenland'//southwestGreenland'//'westCentralGreenland'//'eastCentralGreenland'
+// //'kamchatka'//norway'//'mackenzie'//northernRockies'//'canadianRockies'//'southCoast'//'wrangellStElias'//'chugatch'//alaska'
+
+// // northCoast error
+// var myGlims = table18//.filterBounds(geometry2)// Unable to transform geometry into projection <Projection>.
+// // print(myGlims.geometry().projection())
+// // print(algaeArea.projection())
+// // var myGlims = naGlac//.merge(kaGlac).merge(grGlac)
+// // print(myGlims.size())
+// // print(myGlims.sort('db_area', false).first())
+// // var rangeGeom = regions.filter(ee.Filter.eq('range','norway')).geometry()
+// // var glimsSubset = myGlims.filterBounds(rangeGeom)
+// // Map.addLayer(myGlims)
+// var areaPerGlacier = algaeArea
+//   .reduceRegions({
+//     collection:myGlims,
+//     reducer: ee.Reducer.sum(),
+//     scale:30,
+//     crs: 'EPSG:4326'
+//   })//.aside(print,"test 0")
+//   .filter(ee.Filter.gt('sum',1e5))//10% of 1 sq km
+//   .map(function(f){
+//     f=ee.Feature(f)
+//     var algae_km2 = f.getNumber('sum').divide(1000*1000)
+//     var frac = algae_km2.divide(f.getNumber('db_area'))
+//     return f
+//       .select(['glac_id', 'glac_name', 'db_area'])
+//       .set('frac_algae', frac)
+//   })//.aside(print, "test1")
+// var apg2 = areaPerGlacier
+//   .filter(ee.Filter.gt('frac_algae', 0.10)) // select glaciers with >10% algae coverage
+//   .map(function(f){
+//     return f.set('centroid', f.geometry(500).centroid(500))
+//   })//.aside(print, "test2")
+// // apg2.size().aside(print)
+// // apg2.limit(2).aside(print)
+// // Export.table.toDrive(areaPerGlacier, "algaePerGlacier_"+range,"s2_classifier_map")
+// // Export.table.toAsset(apg2, "chugach_algaePerGlacier","globalSnowAlgae/6_simpleGlims/chugachAlgaeGlaciers")
+
+// //3.6% of bering glacier covered
+
+// // // combine into a single featurecollection
+// var mm = function(str){
+//   var wrap = function(f){
+//     return f.set('range', str)
+//   }
+//   return wrap
+// }
+// var badList = ['G212501E61399N','G230250E55801N','G228828E57381N','G308139E71396N'] 
+// var merged = ag1.map(mm("alaska")) // ak
+//   .merge(ag2.map(mm("coast_north"))) // chu
+//   .merge(ag3.map(mm("coast_north"))) // wseEast
+//   .merge(ag3_1.map(mm("coast_north"))) //ww
+//   .merge(ag3_2.map(mm("coast_north"))) //nw
+//   .merge(ag3_3.map(mm("coast_north"))) //wsw
+//   .merge(ag4.map(mm("coast_south"))) // south coast
+//   .merge(ag5.map(mm("interior_north"))) // int N
+//   .merge(ag6.map(mm("interior_south"))) //int S
+//   .merge(ag7.map(mm("greenland")))//gr
+//   .merge(ag8.map(mm("norway")))//no
+//   .merge(ag9.map(mm("kamchatka"))) //kam
+//   .filter(ee.Filter.neq('glac_id',badList[0]))
+//   .filter(ee.Filter.neq('glac_id',badList[1]))
+//   .filter(ee.Filter.neq('glac_id',badList[2]))
+//   .filter(ee.Filter.neq('glac_id',badList[3]))
+//   .filter(ee.Filter.neq('glac_id','G212535E63548N')) // remove the offending geom
+//   .distinct('glac_id')
+//   .aside(Map.addLayer, {}, "merge")
+// // print(merged.limit(10))
+
+
+// // add the good one back in 
+// var ff = ee.Feature(glims.filter(ee.Filter.eq('glac_id','G212535E63548N'))
+// .filter(ee.Filter.neq('chief_affl','University of Washington'))
+// .first())
+// .simplify(100)
+// Map.addLayer(ff, {}, "ff")
+// var fff = ee.FeatureCollection(ff)
+
+// fff = algaeArea
+//   .reduceRegions({
+//     collection:fff,
+//     reducer: ee.Reducer.sum(),
+//     scale:30,
+//     crs: 'EPSG:4326'
+//   })//.aside(print,"test 0")
+//   .map(function(f){
+//     f=ee.Feature(f)
+//     var algae_km2 = f.getNumber('sum').divide(1000*1000)
+//     var frac = algae_km2.divide(f.getNumber('db_area'))
+//     return f
+//       .select(['glac_id', 'glac_name', 'db_area'])
+//       .set('frac_algae', frac)
+//   })
+//   .map(function(f){
+//     return f.set('centroid', f.geometry(500).centroid(500))
+//   }).aside(print)
+
+// // Map.addLayer(ff,{},"here")
+// // Map.centerObject(ff)
+
+// merged =merged.merge(fff) 
+
+// Export.table.toAsset(merged, "merged_algae_glaciers","globalSnowAlgae/6_simpleGlims/algaeGlaciers2")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// // per region stats as csv --------------------------------------------------------------
+
+// var perRegion = combined.reduceRegions({
+//     collection: regions,
+//     reducer: ee.Reducer.sum(), // get the sum of area for each band
+//     scale: 30  
+// }).map(getPercent)
+
+// // Export.table.toDrive({
+// //   collection: perRegion.map(function(f){
+// //     return f.setGeometry(null)
+// //   }),
+// //   description: "algae_percent_region",
+// //   folder: 's2_classifier_map',
+// //   fileFormat:'CSV'
+// // })
+
+
+// // get area in greenladn ice caps --------------------------------------------------------
+
+// var greenland_ice_caps = ee.FeatureCollection([north_ice_caps, east_ice_caps, west_ice_caps])
+// algaeArea.reduceRegions({
+//     collection: greenland_ice_caps,
+//     reducer: ee.Reducer.sum(), // get the sum of area for each band
+//     scale: 30  
+// })//.aside(print, "greenland ice cap sums")
+// //range,sum_km2
+// //north,60 
+// //east,682 
+// //west,612 
+// //all_greenland,1874
+
+
+// // bloom size ------------------------------------------------------------------------
+// // manually select the visibly largest blooms by loooking at the map at 100 km res
+// // focussing on alaska and greenland
+// var grisBlooms = algaeImage.reduceToVectors({geometry:bigBloomsGreenland, scale:50})//.aside(Map.addLayer)
+//   .map(function(f){return f.set('area',f.area(1000))})
+// var topGrisBlooms = grisBlooms.sort('area',false).limit(5)//.aside(print)
+//   .map(function(f){
+//     var centroid = f.geometry(1000).centroid(1000)
+//     return f.setGeometry(centroid)
+//   }).aside(Map.addLayer, {color:"red"})
+// //80 km2 just north of Nuuk, 77 km2 disko island, 61 km2
+// var akBlooms = algaeImage.reduceToVectors({geometry:bigBloomsAlaska, scale:50})//.aside(Map.addLayer)
+//   .map(function(f){return f.set('area',f.area(1000))})
+// var topAkBlooms = akBlooms.sort('area',false).limit(5)//.aside(print)
+//   .map(function(f){
+//     var centroid = f.geometry(1000).centroid(1000)
+//     return f.setGeometry(centroid)
+//   }).aside(Map.addLayer, {color:"red"})
+// // 26 Hayes/Black Rapids gl, 23, 22 tordrillo km2. Bering 17.
+
+// var hardingAlgae = algaeArea.reduceRegion({reducer:ee.Reducer.sum(), geometry:harding, 
+// scale:50,maxPixels:1e9})//.aside(print) //59km2
+
+
+
+
+
+// // // SCRATCH -------------------------------------------------------------
+
+// // .map(function(f){
+// //   var range = regions.filterBounds(f.geometry()).first().get('range') // hacky spatial join
+// //   return f.simplify(100).set('range',range).transform('EPSG:4326')// simplify polygon to within 100 m
+// // }) 
+// // .aside(Map.addLayer)
+// // Export.table.toAsset(myGlims, "myGlims", "globalSnowAlgae/myGlims2") // create intermediate product
+// // var myGlims = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/myGlims2");
+
+// // Map.addLayer(myGlims)
+// // // myGlims.first().aside(print)
+// // print(glimsSubset.first())// coords are -180, -90. its an issue with the modified glims. 
+
+
+
+// function exportLoRes(roi, crs, export_id, scale){
+//   scale = scale || 1000 // default 1 km res
+  
+//   var lores = algaeImage
+//     .unmask()
+//     .updateMask(glacierMask) // important step to remask by glacier, otherwise it will just be the algae cover in the entire grid cell
+//     .setDefaultProjection(crs)
+//     .reduceResolution(ee.Reducer.mean(), true)
+//     .reproject({crs:crs,scale: scale})
+    
+//   // mask the image
+//   lores = lores
+//     .updateMask(lores.gt(0))
+//   Map.addLayer(lores,{},"lores")
+//   Export.image.toDrive({
+//     image: lores, 
+//     description: export_id,
+//     folder: "s2_classifier_map",
+//     region: roi
+//   });
+// }
+
+// // exportLoRes(regions.filter(ee.Filter.eq('region',"northAmerica")).geometry(), 
+// //   "EPSG:3005", "america_lo_res");
+// // exportLoRes(regions.filter(ee.Filter.inList('range',
+// //   ["norway", "svalbard", "northNorway"])).geometry(), 
+// //   "EPSG:3035", "norway_lo_res");
+// // exportLoRes(regions.filter(ee.Filter.eq('range',"kamchatka")).geometry(), 
+// //   "EPSG:3095", "kamchatka_lo_res");
+
+// // Map.addLayer(regions.filter(ee.Filter.inList('range',
+// //   ['southwestGreenland','southeastGreenland','eastCentralGreenland','westCentralGreenland'])).geometry())
+
+// // exportLoRes(regions.filter(ee.Filter.inList('range',
+// //   ['southwestGreenland','southeastGreenland'])).geometry(),
+// //   "EPSG:5069", "south_greenland_lo_res"); 
+
+// // exportLoRes(regions.filter(ee.Filter.inList('range',
+// //   ['eastCentralGreenland'])).geometry(),
+// //   "EPSG:5069", "east_greenland_lo_res"); 
+// // exportLoRes(regions.filter(ee.Filter.inList('range',
+// //   ['westCentralGreenland'])).geometry(),
+// //   "EPSG:5069", "west_greenland_lo_res"); 
+// // // norway ---------------------------------
+
+
+// // var norge_albers = myFunctions.makeAeaProj([16,64], [60, 68])
+// // var norgeList = ['norway', 'northNorway']
+// // var norge_geoms = regions.filter(ee.Filter.inList('range',norgeList)).geometry()
+// // // Map.addLayer(norge_geoms,{},'norge geoms')
+
+// // // add grid, in equal area projection
+// // var norgeGrid = norge_geoms
+// //   .coveringGrid(norge_albers, smallGridScale)
+// // Map.addLayer(norgeGrid,{}, "grid")
+
+// // // get map values per grid cell
+// // var norgeData = combined.reduceRegions({
+// //     collection: norgeGrid,
+// //     reducer: ee.Reducer.sum(), // get the sum of area for each band
+// //     scale: 30  
+// // }).map(getPercent)
+// // .filter(ee.Filter.gt('glacier_km2',5)) // remove grid cells with no glaciers
+// // //.limit(10).aside(print)
+
+// // Export.table.toDrive({
+// //   collection: norgeData, 
+// //   description: "norge_10km_grid",
+// //   folder: "s2_classifier_map",
+// //   fileFormat: "KML" // KML readable by library(sf) in R
+// // })
+
+
+// // //kamchatka ------------------------------------------------
+
+// // var kam_proj = myFunctions.makeAeaProj([159,56], [50,60])
+// // var kamList = ['kamchatka']
+
+// // function getGridData(prj, scale, rangeList, export_name){
+// //   var roi = regions.filter(ee.Filter.inList('range',rangeList)).geometry()
+
+// //   var grid = roi.coveringGrid(prj, scale)
+  
+// //   // get map values per grid cell
+// //   var data = combined.reduceRegions({
+// //       collection: grid,
+// //       reducer: ee.Reducer.sum(), // get the sum of area for each band
+// //       scale: 30  
+// //   }).map(getPercent)
+// //   .filter(ee.Filter.gt('glacier_km2',5)) // remove grid cells with no glaciers
+  
+// //   Export.table.toDrive({
+// //     collection: data, 
+// //     description: export_name + "_10km_grid",
+// //     folder: "figs",
+// //     fileFormat: "KML" // KML readable by library(sf) in R
+// //   })
+// // }
+// // getGridData(kam_proj, smallGridScale, kamList, "kamchatka");
+
+
+
+// //SCRATCH ------------------
+
+
+// // no need for this complicated solution, can just filter out the grid cells with 0 glacier in R
+
+// // // first, define the glacier area to make grid cells in
+// // var glacierVectors = regions.map(function(f){
+// //   var geom = f.geometry()
+// //   var glacierVec = glacierImage.clip(geom).reduceToVectors({bestEffort:true, scale:1000, geometry: geom})
+// //   // var centroid = glacierVec.geometry().centroid(1000) // add centroid, for text annotation of map
+// //   // var lat = centroid.coordinates().get(1)
+// //   // var lng = centroid.coordinates().get(0)
+// //   return f.setGeometry(glacierVec)//.set({lat:lat, lng:lng})
+// // })
+// // // print(glacierVectors)
+
+// // // testing
+// // // Map.addLayer(glacierVecs, {color:'green'}, "glacierVec")
+// // // print('glacierVecs.first()', glacierVecs.first())
+// // // Map.addLayer(ee.Feature(glacierVecs.filter(ee.Filter.eq('range','aleutian')).first()), {}, "aleutian vector")
+
+
+// var areaImage = ee.Image.pixelArea().divide(1000*1000)
+// // both created using identical tuning parameters
+// var oldArea = oldRockiesImage.select('CLASS').multiply(areaImage).rename('regional')
+// var newArea = newRockiesImage.select('CLASS').multiply(areaImage).rename('comb')
+// var stats = oldArea.addBands(newArea)
+// .reduceRegion({
+//   reducer: ee.Reducer.sum(),
+//   geometry: regions.filter(ee.Filter.eq('range','canadianRockies')).geometry(),
+//   scale:50,
+//   crs:'EPSG:4326',
+//   maxPixels:1e11
+// }).aside(print)//using the regional dataset, 788 km2
+// // using the combined training data: 333 km2
+
+
+// // take a closer look at the probability images, where are discrepancies, and why?
+// // subtract the probabilitys
+
+// var pdif = oldRockiesImage.select('CLASS_PROB')
+//   .subtract(newRockiesImage.select('CLASS_PROB')).aside(Map.addLayer, {min:0, max:0.1, palette:palettes.matplotlib.viridis[7]}, "p dif")
+//   .updateMask(oldRockiesImage.select('CLASS'))// less interested where e.g 0.0 vs 0.25.... 
+  
+// Export.image.toAsset({
+//   image:pdif,
+//   description:"p_dif",
+//   assetId:"globalSnowAlgae/3_algaeMaps2/caRockiesProbDif2",
+//   region:regions.filter(ee.Filter.eq('range','canadianRockies')).geometry(),
+//   scale:50,
+//   crs:'EPSG:4326',
+//   maxPixels:1e10
+// })
+
+
+
+// // scratch ----------------------
+
+// // var naImage = algaeImages.filter(ee.Filter.eq("region","northAmerica")).mosaic().gt(0.3).selfMask()
+// // var worldImage = algaeImages.filter(ee.Filter.neq("region","northAmerica")).mosaic().gt(0.5).selfMask()
+// // var algaeImage = ee.ImageCollection([naImage,worldImage]).mosaic()
+// // algaeImage = myFunctions.despeckle(algaeImage) // important: remove salt and pepper

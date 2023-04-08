@@ -1,0 +1,154 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var algaeMap = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/aaatrainclean2T"),
+    daymet = ee.ImageCollection("NASA/ORNL/DAYMET_V4"),
+    regions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/glacierRegionsV16"),
+    era5 = ee.ImageCollection("ECMWF/ERA5_LAND/MONTHLY_AGGR");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+Get DAYMET climate stats to run as covariates for annual algal bloom intensity
+Runtime: 
+*/
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions')
+var palettes = require('users/gena/packages:palettes');
+
+
+var myScale = 1000 // algaeMask resolution. lower will capture more small scale features
+
+
+var rangeList = ['alaskaRange','interiorNorth','interiorSouth','coastNorth','coastSouth']
+regions = regions.filter(ee.Filter.inList('name', rangeList)).aside(Map.addLayer)
+
+var algaeMask  = algaeMap.select('CLASS_PROB').mosaic().gt(0.2).selfMask()
+// remove small contiguous algal blooms
+// (modis would be fractionally masked, but might as well remove this as it will just add noise)
+algaeMask = myFunctions.despeckle(algaeMask, 500*500)
+algaeMask = algaeMask.unmask(0)
+
+
+var years = ee.List.sequence(2000,2022) // daymet ends in 2021, era til 3 mo from present
+
+
+var maxWrap = function(col){return col.max()}
+var sumWrap = function(col){return col.sum()}
+var meanWrap = function(col){return col.mean()}
+
+function filterCol(col, variableName, startMonth, endMonth, myReducer, newname) {
+  var filteredCol = ee.ImageCollection.fromImages(years.map(function(y){
+    var thisYrsImage = myReducer(col
+      .select(variableName)
+      .filter(ee.Filter.calendarRange(startMonth,endMonth,'month'))
+      .filter(ee.Filter.calendarRange(y,y,'year'))
+    )
+    var nBands = thisYrsImage.bandNames().size()
+    return thisYrsImage.set({'year':y, 'n_bands':nBands}).rename(newname)
+  }))
+  return filteredCol
+    .filter(ee.Filter.eq('n_bands',1)) // avoid applying a mask to an image w 0 bands
+    .map(function(i){return i.updateMask(algaeMask)})
+}
+
+
+// DAYMET ----------------------------------
+var snowdepth = filterCol(daymet, 'swe', 3,5,maxWrap, 'max_snow_depth')//.aside(print) // 1 image per year
+
+var winterPrcp = filterCol(daymet, 'prcp', 11,4,sumWrap, 'winter_precip')
+var summerPrcp = filterCol(daymet, 'prcp', 6,8,sumWrap, 'jja_precip')
+
+var winterTmax = filterCol(daymet, 'tmax', 11,4,meanWrap, 'winter_tmax')
+var mayJunTmax = filterCol(daymet, 'tmax', 5,6,meanWrap, 'mayjun_tmax')
+var junTmax = filterCol(daymet, 'tmax', 6,6,meanWrap, 'jun_tmax')
+var junJulTmax = filterCol(daymet, 'tmax', 6,7,meanWrap, 'junjul_tmax')
+var julTmax = filterCol(daymet, 'tmax', 7,7,meanWrap, 'jul_tmax')
+var summerTmax = filterCol(daymet, 'tmax', 6,8,meanWrap, 'jja_tmax')
+
+var winterTmin = filterCol(daymet, 'tmin', 11,4,meanWrap, 'winter_tmin')
+var mayJunTmin = filterCol(daymet, 'tmin', 5,6,meanWrap, 'mayjun_tmin')
+var junTmin = filterCol(daymet, 'tmin', 6,6,meanWrap, 'jun_tmin')
+var julTmin = filterCol(daymet, 'tmin', 7,7,meanWrap, 'jul_tmin')
+var summerTmin = filterCol(daymet, 'tmin', 6,8,meanWrap, 'jja_tmin')
+
+
+// combine into a single collection, with multiple bands per year
+var daymetAnnualAverages = snowdepth
+  .combine(winterPrcp)
+  .combine(summerPrcp)
+  .combine(winterTmax)
+  .combine(mayJunTmax)
+  .combine(junTmax)
+  .combine(junJulTmax)
+  .combine(julTmax)
+  .combine(summerTmax)
+  .combine(winterTmin)
+  .combine(mayJunTmin)
+  .combine(junTmin)
+  .combine(julTmin)
+  .combine(summerTmin)
+  .sort('year')//.aside(print)
+
+// get stats for each region, per year
+var daymetStats = daymetAnnualAverages.map(function(i){
+  return i.reduceRegions({
+    collection:regions,
+    reducer: myFunctions.myMeanReducer,
+    scale:myScale,// sample at near algae mask resolution? nah shouldnt matter. daymet avail at 1000 m
+    tileScale:2// to avoid OOM error
+  }).map(function(f){return f.set('year', i.get('year'))})
+}).flatten()
+
+// print(d_regionalStats.limit(2))
+Export.table.toDrive(daymetStats, "regionalDaymetStats"+myScale,'modis')
+
+
+// expect that earlier blooms driven by earlier onset of melting temperatures
+
+
+
+// ERA5 ------------------------------
+
+
+var winterPrcpEra = filterCol(era5, 'total_precipitation_sum', 11,4,sumWrap, 'winter_precip')
+var summerPrcpEra = filterCol(era5, 'total_precipitation_sum', 6,8,sumWrap, 'jja_precip')
+print(winterPrcpEra)
+
+var winterTempEra = filterCol(era5, 'temperature_2m', 11,4,meanWrap, 'winter_temp')
+var mayJunTempEra = filterCol(era5, 'temperature_2m', 5,6,meanWrap, 'mayjun_temp')
+var junTempEra = filterCol(era5, 'temperature_2m', 6,6,meanWrap, 'jun_temp')
+var junJulTempEra = filterCol(era5, 'temperature_2m', 6,7,meanWrap, 'junjul_temp')
+var julTempEra = filterCol(era5, 'temperature_2m', 7,7,meanWrap, 'jul_temp')
+var summerTempEra = filterCol(era5, 'temperature_2m', 6,8,meanWrap, 'jja_temp')
+
+var winterPressureEra = filterCol(era5, 'surface_pressure', 11,4,meanWrap, 'winter_pres')
+var mayJunPressureEra = filterCol(era5, 'surface_pressure', 5,6,meanWrap, 'mayjun_pres')
+var junPressureEra = filterCol(era5, 'surface_pressure', 6,6,meanWrap, 'jun_pres')
+var julPressureEra = filterCol(era5, 'surface_pressure', 7,7,meanWrap, 'jul_pres')
+var summerPressureEra = filterCol(era5, 'surface_pressure', 6,8,meanWrap, 'jja_pres')
+
+var eraAnnualAverages = winterPrcpEra
+  .combine(summerPrcpEra)
+  .combine(winterTempEra)
+  //temp
+  .combine(mayJunTempEra)
+  .combine(junTempEra)
+  .combine(junJulTempEra)
+  .combine(julTempEra)
+  .combine(summerTempEra)
+   // pressure
+  .combine(winterPressureEra)
+  .combine(mayJunPressureEra)
+  .combine(junPressureEra)
+  .combine(julPressureEra)
+  .combine(summerPressureEra)
+  .sort('year')//.aside(print)
+
+var eraStats = eraAnnualAverages.map(function(i){
+  return i.reduceRegions({
+    collection:regions,
+    reducer: myFunctions.myMeanReducer,
+    scale:myScale,// sample at near algae mask resolution? nah shouldnt matter. daymet avail at 1000 m
+    tileScale:2// to avoid OOM error
+  }).map(function(f){return f.set('year', i.get('year'))})
+}).flatten()
+
+// print(d_regionalStats.limit(2))
+Export.table.toDrive(eraStats, "regionalEraStats"+myScale,'modis')
+

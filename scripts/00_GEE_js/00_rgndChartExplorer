@@ -1,0 +1,701 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var terra = ee.ImageCollection("MODIS/061/MOD09GA"),
+    terra8 = ee.ImageCollection("MODIS/061/MOD09A1"),
+    glims = ee.FeatureCollection("GLIMS/current"),
+    l8sr = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2"),
+    filmRoi = /* color: #98ff00 */ee.Geometry.MultiPoint(),
+    s2toa = ee.ImageCollection("COPERNICUS/S2"),
+    algae = /* color: #d63000 */ee.Geometry.MultiPoint(),
+    notAlgae = /* color: #98ff00 */ee.Geometry.MultiPoint(),
+    aerosol = ee.ImageCollection("MODIS/006/MCD19A2_GRANULES");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+// simple RGND chart explorer
+
+
+/*
+todo:
+add date lab to layers
+the hi res layer gets first slot, the modis layer gets second slot, ROI gets third slot
+*/
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions');
+var palettes = require('users/gena/packages:palettes');
+
+
+var id = "G206696E61483N"  
+var year = 2020
+
+
+
+// image collection filtering args
+var startMonth = 6
+var endMonth = 9
+var startYear = year
+var endYear = year
+var maxCloud = 50  // max CC per image, used for init image filtering step 
+
+var thresh = 0.5 
+var bufferDist = 700 //m
+
+
+var glacierRegions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/glacierRegionsV12");
+var glacierImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages/glaciers")
+var trainingData = ee.FeatureCollection('projects/ee-caseyengstrom/assets/globalSnowAlgae/2_trainDat/train5')
+var algaeImages = ee.ImageCollection('projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps/v5')
+
+var snow = ee.ImageCollection("MODIS/006/MOD10A1")
+  .filter(ee.Filter.calendarRange(startMonth,endMonth,'month'))
+  .filter(ee.Filter.calendarRange(startYear,endYear,'year'))
+  
+
+var centerPoint = glims.filter(ee.Filter.eq('glac_id',id)).geometry()
+Map.addLayer(centerPoint)
+Map.centerObject(centerPoint,12)
+
+
+// create algae and glacier maps 
+var naImage = algaeImages.filter(ee.Filter.eq("region","northAmerica")).mosaic().gt(0.3).selfMask()
+var worldImage = algaeImages.filter(ee.Filter.neq("region","northAmerica")).mosaic().gt(0.5).selfMask()
+var algaeImage = ee.ImageCollection([naImage,worldImage]).mosaic()
+algaeImage = myFunctions.despeckle(algaeImage) // important: remove salt and pepper
+var algaeMask = algaeImage.unmask()
+Map.addLayer(algaeImage,{palette:["red"]}, 'pred algae') // layer 0 is reserved for the algae basemap
+
+var glacierMask = glacierImages.map(function(i){
+  return ee.Image(i.rename('glacier')) 
+}).mosaic().unmask()
+
+
+
+
+
+
+// S2 functions -------------------------------------------------------------------
+
+// provide the same training data as was used to make the map
+var trainedClassifier = myFunctions.trainClassifier(trainingData);
+var s2Plus;
+
+
+
+// print(myS2.size())
+
+// Create weekly mosaics. This removes redundant images for polar regions with high flyover
+// making fewer images needed to look at. Also solves the problem of points being located 
+// on the edge of an image
+
+// (1) make a list of weeks in each year
+var millisInWeek = 1000*60*60*24*5;
+
+var milliList = ee.List.sequence(
+  ee.Date("2019-07-01").millis(), 
+  ee.Date("2022-09-01").millis(), 
+  millisInWeek
+)
+
+// make a mosaic for a point on the fly
+function filterS2(roi){
+  
+  var myS2 = myFunctions.filterS2ForAlgae({
+    roi: roi.buffer(50000),
+    startMonth: startMonth,
+    endMonth: endMonth,
+    maxCloudCover: maxCloud
+  }).filter(ee.Filter.calendarRange(startYear,endYear,'year'))
+
+  // (2) make a low-cloud mosaic for each week in the list
+  var weeklyMosaics = ee.ImageCollection.fromImages(
+    milliList.map(function (milli) {
+      var date = ee.Date(milli);
+      var images = myS2
+        .filterDate(date, date.advance(5,'day')) 
+        .sort('CLOUDY_PIXEL_PERCENTAGE', false); // clear images will be on top
+      
+      var dateProperties = {
+          'date': date.format("YYYY-MM-dd"), 
+          'milli':milli
+        };
+      // if there are images in the specified date range, add the mosaic to the collection, 
+      return ee.Algorithms.If(images.size().neq(0), images.mosaic().set(dateProperties));
+  }))
+  
+  // (3) add classifier bands to weekly mosaics
+  // and get the probability at each point
+  var s2Plus = weeklyMosaics.map(function(image){
+    var plusNDs = myFunctions.normalizeBands(image);
+    var redMask = myFunctions.redSnowMask(plusNDs); // pre-processing step, mask non-red snow
+    var maskedImage = plusNDs.updateMask(redMask).updateMask(glacierMask); 
+    var probability = maskedImage.classify(trainedClassifier, 'CLASS_PROB').rename('CLASS_PROB'); // for Map
+    var probUnmasked = probability.unmask().rename('ALGAE_PROB'); // for Chart, so you can click on most dates
+    var classification = probability.gt(thresh).rename('CLASSIFICATION'); // masked by RGND, a binary image
+    
+    var rgnd = plusNDs.select('RGND')
+    var rgndMask = rgnd.gt(0)
+    var rgnd0 = rgnd.multiply(rgndMask)
+    
+    var cloudMask = image.select('MSK_CLDPRB').lt(10)
+    var ndsi = plusNDs.select('NDSI').updateMask(cloudMask)
+    var ndsiSnow = ndsi.gt(0.95).rename('NDSI_SNOW')
+    
+    var mskSnow50 = plusNDs.select('MSK_SNWPRB').gt(50).rename('MSK_SNWPRB_50').updateMask(cloudMask)
+    
+    var greenMask = plusNDs.select('B3').gt(5000).rename('GREENMASK').updateMask(cloudMask)
+    
+    return image
+      .addBands(plusNDs.select('GBND'))
+      .addBands(ndsi)
+      .addBands(greenMask)
+      .addBands(mskSnow50)
+      .addBands(ndsiSnow)
+      .addBands(rgnd0.rename('RGND0').updateMask(redMask))
+      .addBands(probability)
+      .addBands(probUnmasked)
+      .addBands(classification);
+  })//.limit(10).aside(print)
+  s2Plus = s2Plus
+  return s2Plus
+}
+
+
+// function filterS2(roi){
+//   var myS2 = myFunctions.filterS2ForAlgae({
+//     roi: roi,
+//     startMonth: startMonth,
+//     endMonth: endMonth,
+//     maxCloudCover: maxCloud
+//   })//.filterDate(startDate, endDate);
+
+//   var s2Plus = myS2.map(function(image){
+//     var plusNDs = myFunctions.normalizeBands(image);
+//     var redMask = myFunctions.redSnowMask(plusNDs); // pre-processing step, mask non-red snow
+//     var maskedImage = plusNDs.updateMask(redMask).updateMask(glacierMask); 
+//     var probability = maskedImage.classify(trainedClassifier, 'CLASS_PROB').rename('CLASS_PROB'); // for Map
+//     var probUnmasked = probability.unmask().rename('ALGAE_PROB'); // for Chart, so you can click on most dates
+//     var classification = probability.gt(thresh).rename('CLASSIFICATION'); // masked by RGND, a binary image
+    
+//     var rgnd = plusNDs.select('RGND')
+//     var rgndMask = rgnd.gt(0)
+//     var rgnd0 = rgnd.multiply(rgndMask)
+    
+//     return image
+//       .addBands(plusNDs.select('GBND'))
+//       .addBands(rgnd0.rename('RGND0'))
+//       .addBands(probability)
+//       .addBands(probUnmasked)
+//       .addBands(classification);
+//   })//.limit(10).aside(print)
+//   s2Plus = s2Plus
+//   return s2Plus
+// }
+
+var my_s2sr_image;
+function loadS2Layer(x, y, series){ // series arg selects the series
+  my_s2sr_image = ee.Image(s2Plus
+    .filter(ee.Filter.eq('milli', x)) // ie image property: date = date from the x axis of the chart 
+    .first());
+  var date = ee.Date(my_s2sr_image.get('milli')).format('YYYY-MM-dd').getInfo()
+  var ndsiLayer = ui.Map.Layer(my_s2sr_image.select('NDSI'),
+    {palette: palettes.matplotlib.viridis[7], min:0.85, max:0.99}, "s2 NDSI" +date )
+  var snowCoverLayer = ui.Map.Layer(my_s2sr_image.select('NDSI_SNOW'),
+    {}, "s2 ndsi snow "+date )
+  var snowProbLayer = ui.Map.Layer(my_s2sr_image.select('MSK_SNWPRB'),
+    {}, "s2 MSK SNWPRB "+date )
+  var snowProb50Layer = ui.Map.Layer(my_s2sr_image.select('MSK_SNWPRB_50'),
+    {}, "s2 MSK SNWPRB 50 "+date )
+  var greenmaskLayer = ui.Map.Layer(my_s2sr_image.select('GREENMASK'),
+    {}, "s2 GREENMASK "+date )
+  Map.layers().set(2, ui.Map.Layer(my_s2sr_image, myFunctions.rgbVisParam, "s2 RGB "+date )); // layer 2 is reserved for S2 rgb (0 for algae map, 1 for max comp)
+  Map.layers().set(3, ndsiLayer); 
+  Map.layers().set(4, snowCoverLayer)
+  Map.layers().set(5, snowProbLayer)
+  Map.layers().set(6, snowProb50Layer)
+  Map.layers().set(7, greenmaskLayer)
+}
+
+
+
+// S2 toa functions -------------------------------------------------------------------
+
+var s2ToaPlus;
+
+var toaMilliList = ee.List.sequence(
+  ee.Date("2016-07-01").millis(), 
+  ee.Date("2022-09-01").millis(), 
+  millisInWeek
+)
+
+function filterS2Toa(roi){
+
+  var myS2Toa = s2toa
+    .filter(ee.Filter.calendarRange(startMonth, endMonth, 'month'))
+    .filterBounds(roi) // a complex polygon can be computationally expensive
+
+  // (2) make a low-cloud mosaic for each week in the list
+  var weeklyToaMosaics = ee.ImageCollection.fromImages(
+    toaMilliList.map(function (milli) {
+      var date = ee.Date(milli);
+      var images = myS2Toa
+        .filterDate(date, date.advance(5,'day')) 
+        .sort('CLOUDY_PIXEL_PERCENTAGE', false); // clear images will be on top
+      
+      var dateProperties = {
+          'date': date.format("YYYY-MM-dd"), 
+          'milli':milli
+        };
+      // if there are images in the specified date range, add the mosaic to the collection, 
+      return ee.Algorithms.If(images.size().neq(0), images.mosaic().set(dateProperties));
+  }))
+  
+  // (3) add classifier bands to weekly mosaics
+  // and get the probability at each point
+  var s2ToaPlus = weeklyToaMosaics.map(function(image){
+    var plusNDs = myFunctions.normalizeBands(image);
+    var redMask = myFunctions.redSnowToaMask(plusNDs); // pre-processing step, mask non-red snow
+    var maskedImage = plusNDs.updateMask(redMask).updateMask(glacierMask); 
+
+    var rgnd = plusNDs.select('RGND')
+    var rgndMask = rgnd.gt(0)
+    var rgnd0 = rgnd.multiply(rgndMask)
+    
+    return image
+      .addBands(plusNDs.select('GBND'))
+      .addBands(rgnd0.rename('RGND0').updateMask(redMask))
+  })//.limit(10).aside(print)
+  s2ToaPlus = s2ToaPlus
+  return s2ToaPlus
+}
+
+function loadS2ToaLayer(x, y, series){ // series arg selects the series
+  var displayImage = ee.Image(s2ToaPlus
+    .filter(ee.Filter.eq('milli', x)) // ie image property: date = date from the x axis of the chart 
+    .first());
+  // var date = displayImage.date().format('YYYY-MM-dd').evaulate(function)
+  Map.layers().set(3, ui.Map.Layer(displayImage, myFunctions.rgbVisParam, "s2 toa rgb" )); // layer 2 is reserved for S2 rgb (0 for algae map, 1 for max comp)
+}
+
+
+
+
+
+
+
+// L8 functions ----------------------------------------------------------------------------
+
+
+var l8Plus;
+function filterL8(roi){
+  var myL8 = l8sr
+    .filterBounds(roi)
+    .filter(ee.Filter.calendarRange(startMonth,endMonth,'month'))
+    .filter(ee.Filter.lt('CLOUD_COVER_LAND', maxCloud)) // remove high cloud % images
+  
+  var l8Plus = myL8.map(function(image){
+    var qaMask = myFunctions.maskL8(image)
+    
+    image = myFunctions.computeNDs(image,'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 22000)
+    // add RGND0_MSKD band
+
+    return image
+    
+  })//.limit(10).aside(print)
+  l8Plus = l8Plus
+  return l8Plus
+}
+
+
+// make clickable chart
+function loadL8Layer(x, y, series){ // series arg selects the series
+  var displayImage = ee.Image(l8Plus
+    .filter(ee.Filter.eq('system:time_start', x)) // ie image property: date = date from the x axis of the chart 
+    .first());
+  // var date = displayImage.date().format('YYYY-MM-dd').evaulate(function)
+  Map.layers().set(4, ui.Map.Layer(displayImage, myFunctions.l8RgbVisParam, "l8 rgb" )); // layer 3 is reserved for l8 rgb
+}
+
+
+
+
+
+// Terra Daily functions -----------------------------------------------------------------------
+
+// make next and back image clicker
+var myTerraDay = terra
+  .filter(ee.Filter.calendarRange(startMonth, endMonth, 'month'))
+  .map(processTerraDay)
+// print(myTerraDay.first())
+
+function processTerraDay(image){
+      // 1 km QA mask
+      var qa = image.select('state_1km')
+      var cloudState = myFunctions.bitwiseExtract(qa, 0, 1).rename('cloudState')
+      var cloudShadowState = myFunctions.bitwiseExtract(qa, 2,2).rename('cloudShadowState')
+      var aerosolState = myFunctions.bitwiseExtract(qa, 6, 7).rename('aerosolState')
+      var cirrusState = myFunctions.bitwiseExtract(qa, 8, 9).rename('cirrusState')
+      var snowState = myFunctions.bitwiseExtract(qa, 15).rename('snowState')
+      var qaMask = //cloudState.eq(0) // not cloudy // often masks snow algae even on clear days :()
+        cloudShadowState.eq(0) // not cloud shadow
+        .and(aerosolState.neq(3)) // not high aerosol
+        .and(cirrusState.neq(3)) // not high cirrus
+        // .and(snowState.eq(1)) // marked as snow
+      
+      var nObsMask = image.select('num_observations_500m').gte(2) // 2 or more obs
+        
+      // 500 m QC Mask
+      var qc = image.select('QC_500m')
+      var qcState1 = myFunctions.bitwiseExtract(qc, 2, 5).rename('b1QC')   // b1
+      var qcState2 = myFunctions.bitwiseExtract(qc, 6, 9).rename('b2QC')   // b2
+      var qcState3 = myFunctions.bitwiseExtract(qc, 10, 13).rename('b3QC') // b3
+      var qcState4 = myFunctions.bitwiseExtract(qc, 14, 17).rename('b4QC') // b4
+      var qcMask = qcState1.eq(0) // b1 ideal quality
+        .and(qcState2.eq(0))      // b2 ideal quality
+        .and(qcState3.eq(0))      // b3 " "
+        .and(qcState4.eq(0))      // b4 ideal quality
+      
+
+      image = myFunctions.computeNDs(image,'sur_refl_b04', 'sur_refl_b01', 'sur_refl_b02', 'sur_refl_b06', 4000)
+      // RGND0_MSKD
+      
+      return image
+        .updateMask(glacierMask)
+        // .updateMask(ndsiMask)
+        .updateMask(qaMask) 
+        // .updateMask(nObsMask)
+        // .updateMask(qcMask)
+        // .addBands(rgnd0)
+        // .addBands(gbnd)
+        // .addBands(ndsi)
+        // .addBands(cloudState)
+        // .addBands(cloudShadowState)
+        // .addBands(cirrusState)
+        // .addBands(aerosolState)
+}
+
+function loadTerraDayLayer(x, y, series){ // series arg selects the series
+  var displayImage = ee.Image(myTerraDay
+    .filter(ee.Filter.eq('system:time_start', x)) // ie image property: date = date from the x axis of the chart 
+    .first());//.reproject('EPSG:3005') // reprojection outpt too large
+  // var date = displayImage.date().format('YYYY-MM-dd').getInfo()
+  Map.layers().set(5, ui.Map.Layer(displayImage,myFunctions.modisRgbVisParam, "mod rgb")); // layer 4 reserved for modis RGB
+  Map.layers().set(6, ui.Map.Layer(displayImage.select('RGND0_MSKD'),myFunctions.rgndVisParam, "mod rgnd", false)); // layer 5 reserved for modis RGND
+}
+
+
+
+//  Terra 8 -----------------------------
+var myTerra8 = terra8
+  .filter(ee.Filter.calendarRange(startMonth, endMonth, 'month'))
+  .filter(ee.Filter.calendarRange(startYear, endYear, 'year'))
+  .map(function(image){
+    image = myFunctions.computeNDs(image,'sur_refl_b04', 'sur_refl_b01', 'sur_refl_b02', 'sur_refl_b06', 4000)
+    return image.updateMask(glacierMask)
+  })
+
+  // .map(processTerra)
+// print(myTerra8.first())
+
+var thisTerra;
+function loadTerra8Layer(x, y, series){ // series arg selects the series
+  thisTerra = ee.Image(myTerra8
+    .filter(ee.Filter.eq('system:time_start', x)) // ie image property: date = date from the x axis of the chart 
+    .first())
+  thisTerra = thisTerra.reproject({crs:'EPSG:3005', scale:500})
+  var date = thisTerra.date().format('YYYY-MM-dd').getInfo()
+  var rgndLayer = ui.Map.Layer(thisTerra.select('RGND0_MSKD'),myFunctions.rgndVisParam, "mod rgnd"+date)
+  
+  var ndsiLayer = ui.Map.Layer(thisTerra.select("NDSI"),
+    {palette:palettes.matplotlib.viridis[7]}, "ndsi"+date)
+    
+  Map.layers().set(5, ui.Map.Layer(thisTerra,{}, "terra"+date, false)); 
+  Map.layers().set(6,ndsiLayer) ; 
+  Map.layers().set(7,rgndLayer)
+}
+
+
+
+// aerosol --------------------------------------
+var myAerosol = aerosol.select('Optical_Depth_055')
+  .filter(ee.Filter.calendarRange(startMonth, endMonth, 'month'))
+
+
+// Snow ----------------------------
+
+function loadSnowLayer(x, y, series){ // series arg selects the series
+  var snowImage = ee.Image(snow
+    .filter(ee.Filter.eq('system:time_start', x)) // ie image property: date = date from the x axis of the chart 
+    .first())
+  snowImage = snowImage.reproject({crs:'EPSG:3005', scale:500})
+  var snowLayer = ui.Map.Layer(snowImage.select('NDSI_Snow_Cover'), // not sure why it's getting masked
+    {min:0, max:100, palette:palettes.matplotlib.viridis[7]}, "snow");
+  var albedoLayer = ui.Map.Layer(snowImage.select('Snow_Albedo_Daily_Tile'),
+    {min:0, max:100, palette:palettes.matplotlib.viridis[7]}, "albedo")
+    
+  Map.layers().set(3, snowLayer)
+  Map.layers().set(4, snowImage)
+}
+
+
+
+// UI functinos -----------------------------------------------------------------
+function refreshChart(point){
+  var roi = point.buffer(bufferDist) 
+  
+  var userPointLayer = ui.Map.Layer(roi, {color: 'green'},"Chart location");
+
+  // update s2Plus global variable
+  s2Plus = filterS2(roi)
+  s2ToaPlus = filterS2Toa(roi)
+  l8Plus = filterL8(roi)
+  // no need to filter modis, each image covers entire earth
+
+  // generate a time series chart of mean RGND0 at roi
+  var s2chart = ui.Chart.image.series({
+    imageCollection: s2Plus.select('RGND0'),
+    region: roi,
+    reducer: ee.Reducer.mean(),
+    scale: 30,
+    xProperty: 'milli'
+  });
+  var s2NdsiChart = ui.Chart.image.series({
+    imageCollection: s2Plus.select('NDSI'),
+    region: roi,
+    reducer: ee.Reducer.mean(),
+    scale: 30,
+    xProperty: 'milli'
+  });
+  var s2NdsiSnowChart = ui.Chart.image.series({
+    imageCollection: s2Plus.select('NDSI_SNOW'),
+    region: roi,
+    reducer: ee.Reducer.sum(),
+    scale: 30,
+    xProperty: 'milli'
+  });
+  var s2MskSnwPrbChart = ui.Chart.image.series({
+    imageCollection: s2Plus.select('MSK_SNWPRB_50'),
+    region: roi,
+    reducer: ee.Reducer.sum(),
+    scale: 30,
+    xProperty: 'milli'
+  });
+  var greenmaskChart = ui.Chart.image.series({
+    imageCollection: s2Plus.select('GREENMASK'),
+    region: roi,
+    reducer: ee.Reducer.sum(),
+    scale: 30,
+    xProperty: 'milli'
+  });
+  var s2toachart = ui.Chart.image.series({
+    imageCollection: s2ToaPlus.select('RGND0'),
+    region: roi,
+    reducer: ee.Reducer.mean(),
+    scale: 30,
+    xProperty: 'milli'
+  });
+  var l8chart = ui.Chart.image.series({
+    imageCollection: l8Plus.select('RGND0_MSKD'),
+    region: roi,
+    reducer: ee.Reducer.mean(),
+    scale: 30
+  });
+  var terra8Chart = ui.Chart.image.series({
+    imageCollection: myTerra8.select('RGND0_MSKD'),
+    region: roi,
+    reducer: ee.Reducer.mean(),
+    scale:1000
+  });
+  var ndsiChart = ui.Chart.image.series({
+    imageCollection: myTerra8
+      .select('NDSI'),
+    region: roi,
+    scale:1000
+  });
+  // var modChart = ui.Chart.image.series({
+  //   imageCollection: myTerraDay.select('RGND0_MSKD'),
+  //   region: roi,
+  //   reducer: ee.Reducer.mean(),
+  //   scale:500
+  //});
+  // var aerosolChart = ui.Chart.image.series({
+  //   imageCollection: myAerosol.filterBounds(roi),
+  //   region: roi,
+  //   reducer: ee.Reducer.mean(),
+  //   scale:10000
+  // });
+  var snowChart = ui.Chart.image.series({
+    imageCollection: snow
+      .filterBounds(roi)
+      .select('NDSI_Snow_Cover'),
+    region: roi,
+    reducer: ee.Reducer.mean(),
+    scale:1000
+  });
+  var snowDoyChart = ui.Chart.image.doySeries({
+    imageCollection: snow
+      .filterBounds(roi)
+      .select('NDSI_Snow_Cover'),
+    region: roi,
+    scale:1000
+  });
+
+  s2chart.onClick(loadS2Layer); 
+  panel.widgets().set(1, s2chart); //layer1 of panel reserved for s2 chart
+  panel.widgets().set(2, s2NdsiSnowChart)
+  panel.widgets().set(3, s2MskSnwPrbChart)
+  panel.widgets().set(4, greenmaskChart)
+  
+  s2toachart.onClick(loadS2ToaLayer); 
+  // panel.widgets().set(2, s2toachart); //layer2 of panel reserved for s2 chart
+  
+  l8chart.onClick(loadL8Layer); 
+  // panel.widgets().set(3, l8chart);//layer3 of panel reserved for l8 chart
+  
+  terra8Chart.onClick(loadTerra8Layer); 
+  // panel.widgets().set(4, terra8Chart);//layer4 of panel reserved for MOSIS chart
+  // panel.widgets().set(5, ndsiChart);
+
+  snowChart.onClick(loadSnowLayer); 
+  // panel.widgets().set(6, snowChart);
+  // panel.widgets().set(6, snowDoyChart);
+  
+  var maxRgndComp = s2Plus
+    .qualityMosaic('RGND0')
+    .updateMask(glacierMask) // easier to do this in one step at the end
+  // Map.layers().set(1, ui.Map.Layer(maxRgndComp, myFunctions.rgbVisParam, "rgnd max comp", false)); // layer 3 reserved for modis RGND
+//need dummy layers or else userPoint will be put on layer 2
+
+  Map.layers().set(3, userPointLayer); // layer 2 is reserved for the point
+}
+
+
+
+var mapClickButton = ui.Button({
+  label: 'Click to refresh chart for point',
+  onClick: function() {
+    Map.style().set('cursor', 'crosshair');
+    // Temporarily allow the map to listen to the mouse
+    var listenerId = Map.onClick(function(coords) {
+      var point = ee.Geometry.Point(coords.lon, coords.lat);
+      refreshChart(point);
+      // reset cursor 
+      Map.style().set('cursor', 'hand');
+      Map.unlisten(listenerId);
+    });
+  }
+});
+
+// export image --------------------
+
+function getImage(){
+  // var roi =  // extract current polygon from filmRoi
+  Export.image.toDrive({image: my_s2sr_image, folder:"figs", region: roi, scale:10})
+}
+
+
+
+// filmstrips, video outs ------------------------------
+
+
+function getFilmstrip(){
+  var s2link = ui.Label({
+    value: "s2 filmstrip",
+    targetUrl: s2Plus.getFilmstripThumbURL({
+      dimensions: 128,
+      region: filmRoi,
+      bands: ["B4","B3","B2"],
+      gamma: 0.3,
+      max: 10000
+    })
+  });
+  panel.widgets().set(4, s2link);
+  
+  var l8link = ui.Label({
+    value: "l8 filmstrip",
+    targetUrl: l8Plus.getFilmstripThumbURL({
+      dimensions: 128,
+      region: filmRoi,
+      bands: ['SR_B4', 'SR_B3','SR_B2'],
+      min:0,
+      max:50000,
+      gamma:0.3
+    })
+  })
+  panel.widgets().set(5, l8link);
+}
+
+// draw a polygon around the region to export
+var filmstripButton = ui.Button({
+  label: 'filmstrip',
+  onClick: getFilmstrip
+});
+
+// var s2Vowell = s2
+//   .filter(ee.Filter.contains('.geo', vowellModis)) // completely contained
+//   .map(unmaskedFracInROI('CLOUD_MASK', vowellModis, 10))
+//   .filter(ee.Filter.gt('ROI_UNMASKED_FRACTION', 0.8)) // remove images w high clouds in ROI
+// // print(s2Vowell.aggregate_array('ROI_UNMASKED_FRACTION')) // testing
+
+
+
+
+// assemble the final panel
+var buttonStrip = ui.Panel({layout: ui.Panel.Layout.flow('horizontal')})
+  .add(mapClickButton)
+  .add(filmstripButton)
+
+var panel = ui.Panel({style: {width: '500px'}})
+  .add(buttonStrip) // panel index 0
+  
+ui.root.add(panel);  
+
+
+
+// sampling functions -----------------------------------
+var drawingTools = Map.drawingTools();
+var drawnLayers = drawingTools.layers() // all layers should be present at start
+
+// clear geometries within all drawnLayers 
+function clearGeoms(){
+  for (var i = 0; i < drawnLayers.length(); i = i + 1){
+    var geoms = drawnLayers.get(i).geometries();
+    // remove all geoms in layer
+    while(geoms.length()>0){
+      geoms.remove(geoms.get(0));
+    }
+  }
+}
+clearGeoms();
+
+function getVal(i,name){
+  var myLayer = drawnLayers.get(i)
+  if(myLayer!==undefined){
+    return thisTerra
+      .sample({
+        region: myLayer.toGeometry(),
+        scale: 500,
+        geometries: true
+      }).map(function(f){
+        return f.set('class',name) 
+      })
+  }else{return null}
+}
+
+
+function mySample(){
+  var a = getVal(1,"algae")
+  var b = getVal(2,"other")
+  var merge =a.merge(b).aside(print)
+  Map.layers().set(6, ui.Map.Layer(merge, {}, "sampled")) 
+  
+  var size = merge.size().getInfo()
+  var rand = myFunctions.randomString(2) // add random identifier to each filename to avoid duplicates
+  var id = thisTerra.get('system:index').getInfo() + "_" + size + "pts"+"_"+rand
+  Export.table.toDrive({
+    collection: merge,
+    description: id,
+    folder: 'modis_cart_train_dat',
+    fileNamePrefix: id
+  })
+  
+  clearGeoms();
+}
+
+var sampleButton = ui.Button("sample",mySample);
+print(sampleButton);

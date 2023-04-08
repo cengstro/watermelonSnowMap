@@ -1,0 +1,135 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var glacierUidImageCollection = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages/uidGlaciers"),
+    glims = ee.FeatureCollection("GLIMS/current"),
+    algaeMap = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/aaatrainclean2T"),
+    glacierImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages2/glacierImages2"),
+    regions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/regions_plus_thresholds"),
+    threshImage = ee.Image("projects/ee-caseyengstrom/assets/globalSnowAlgae/threshImage");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+1) get algae and glacier areas
+3) per glacier % cover stats
+
+
+*/
+
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions');
+var palettes = require('users/gena/packages:palettes');
+
+
+Map.addLayer(regions)
+
+var threshPropName = "thrsRF5"// thrsRF1 //thrsRF5
+
+
+// get area estimates per region --------------------------------------
+// Map.addLayer(glims.filter(ee.Filter.gt('db_area',1)))
+// algaeMap.aggregate_array('n_images').aside(print) // 81,527 
+
+var threshImage = regions.reduceToImage([threshPropName], ee.Reducer.first())//.aside(Map.addLayer,{},"threshimage")
+var algaeImage = algaeMap.select('CLASS_PROB').mosaic().gt(threshImage)
+var glacierImage = glacierImages.mosaic()
+
+var areaImage = ee.Image.pixelArea().divide(1000*1000) // in km2
+var glacierAreaImage = glacierImage.multiply(areaImage).rename('glacier')
+var algaeAreaImage = algaeImage.multiply(areaImage).rename('algae')
+var redMaskAreaImage = algaeImage.select('CLASS_PROB').gte(0) // ie the unmasked portion of the image
+  .multiply(areaImage).rename('redmask')
+
+var algalCover = glacierAreaImage
+  .addBands(algaeAreaImage)
+  .addBands(redMaskAreaImage)
+  .reduceRegions({
+    collection: regions.select(['name']).filter(ee.Filter.neq('name',"greenlandNoSheet")),
+    reducer: ee.Reducer.sum(),
+    scale:50
+  })
+// print(algalCover)
+
+Export.table.toDrive({
+  collection: algalCover,
+  description: threshPropName + "Area", 
+  folder: "area",
+  selectors:['name','sbrgnOf','algae','redmask','glacier']
+})
+
+
+// area for greenland ice caps+glaciers only, excluding ice sheet --------------------
+// this is because we used images to define this ROI, 
+var grNoSheetMask = glacierImages.filter(ee.Filter.eq('name','greenlandNoSheet')).first().unmask(0,false)
+// Map.addLayer(grNoSheetMask,{min:0, max:1},"grNoSheetMask")
+var algaeAreaNoSheet = algaeAreaImage.updateMask(grNoSheetMask)
+var redMaskAreaNoSheet = redMaskAreaImage.updateMask(grNoSheetMask)
+
+var algalCoverNoSheet = algaeAreaNoSheet
+  .addBands(redMaskAreaNoSheet)
+  .addBands(grNoSheetMask.multiply(areaImage).rename('glacier'))
+  .reduceRegions({
+    collection: regions.filter(ee.Filter.eq('name','greenlandNoSheet')),
+    reducer: ee.Reducer.sum(),
+    scale:50
+  })
+print(algalCoverNoSheet)
+
+Export.table.toDrive({
+  collection:algalCoverNoSheet,
+  description: threshPropName +"algaeAreaGrNoSheet",
+  folder:"area"
+})
+
+
+// glacier stats ------------------------
+
+
+var uidGlacierImage = glacierUidImageCollection.mosaic()
+var algaeMask = algaeMap.select('CLASS').mosaic()
+var bloomUid = uidGlacierImage.updateMask(algaeMask) // the algae mask, labelled by glacier ID
+var myRegions = regions
+  .filter(ee.Filter.neq('name','greenlandNoSheet'))
+  .filter(ee.Filter.neq('name','antarcticaNoSheet'))
+
+// count algae pixels per glacier: 
+var algaeHist = bloomUid.reduceRegions({
+  collection: myRegions,
+  reducer: ee.Reducer.frequencyHistogram(),
+  scale:50 //250 m2
+})
+Export.table.toDrive({
+  collection: algaeHist,
+  description: "algae_pix_count_per_glacier", 
+  folder: "area", 
+  fileNamePrefix: "algae_pix_count_per_glacier"
+})
+
+var glacierHist = uidGlacierImage.reduceRegions({
+  collection: myRegions,
+  reducer: ee.Reducer.frequencyHistogram(),
+  scale:50 //250 m2
+})
+Export.table.toDrive({
+  collection: glacierHist,
+  description: "glacier_pix_count", 
+  folder: "area", 
+  fileNamePrefix: "glacier_pix_count"
+})
+
+
+
+
+
+
+
+///scatch--------------
+
+// var nglaciers = bloomUid
+//   .reduceRegions({
+//     collection:myRegions,
+//     reducer: ee.Reducer.countDistinct(),
+//     scale: 100// reduce resolution to ignore isolated pixels
+//   })
+// Export.table.toDrive({
+//   collection: nglaciers,
+//   description: "n_glaciers_w_algae_per_region100", 
+//   folder: "area", 
+//   fileNamePrefix: "n_glaciers_w_algae_per_region100"
+// })

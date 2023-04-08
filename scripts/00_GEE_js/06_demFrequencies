@@ -1,0 +1,356 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var algaeMap = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/aaatrainclean2T"),
+    dem = ee.Image("MERIT/DEM/v1_0_3"),
+    regions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/glacierRegionsV14"),
+    glacierImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages/glaciers");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+
+*/
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions');
+var palettes = require('users/gena/packages:palettes');
+
+var glacierMask = glacierImages.map(function(i){
+  return ee.Image(i.rename('glacier')) 
+}).mosaic()
+var algaeMask = algaeMap.select('CLASS').mosaic()
+
+
+dem = dem.divide(10).round().multiply(10)// round elevation to the nearest 10 m
+dem = ee.Terrain.products(dem) // calculate slope, aspect
+// only report aspect above 15 degrees slope 
+var slopeMask = dem.select('slope').gt(15) 
+var aspectMasked = dem.select('aspect').updateMask(slopeMask).rename('aspectMasked')
+dem = dem.select(['slope', 'dem']).addBands(aspectMasked)
+
+var demAlgae = dem.updateMask(algaeMask)
+var demGlacier = dem.updateMask(glacierMask)
+Map.addLayer(demAlgae.select('dem'), {min:1200, max:2000,palette:palettes.matplotlib.viridis[7]})
+
+var algaeData = demAlgae
+  .reduceRegions({
+    reducer: ee.Reducer.frequencyHistogram(),
+    collection: regions,
+    scale: 100
+  });
+print(algaeData.first())
+Export.table.toDrive(algaeData, "demHistAlgae", "covariates")
+
+var glacierData = demGlacier
+  .reduceRegions({
+    reducer: ee.Reducer.frequencyHistogram(),
+    collection: regions,
+    scale: 100
+  });
+print(glacierData.limit(10))
+Export.table.toDrive(glacierData, "demHistGlacier", "covariates")
+
+
+
+
+
+// scratch ------------------------------------------------
+
+
+
+
+// // high vs low algal masks ---------------------------
+
+// var bigBlooms = myFunctions.despeckle(algaeImage, 1000*1000).unmask() // important: remove salt and pepper
+// Map.addLayer(bigBlooms,{min:0, max:1,palette:['white',"red"]}, 'pred algae') // layer 0 is reserved for the algae basemap
+
+// var smallGridScale = 10000 
+// var na_albers = myFunctions.makeAeaProj([-100, 65],[50, 70])
+
+// // split up into batches to allow computation to succeed
+// // var northAmerica = ['chugatch','alaska','wrangellStElias','northCoast','southCoast','canadianRockies','northernRockies','mackenzie']
+// var myGeom = regions.filter(ee.Filter.inList('range', northAmerica)).geometry()
+
+// // add grid, in equal area projection
+// var smallGrid = myGeom
+//   .coveringGrid(na_albers, smallGridScale)//.aside(Map.addLayer)
+//   // .aside(Map.addLayer, {},"10k grid")
+
+// // // remove small grid cells with no algae in s2 map
+// // smallGrid = bigBlooms.reduceRegions({
+// //     collection: smallGrid,
+// //     reducer: ee.Reducer.sum(), // get the sum of area for each band
+// //     scale: 30  
+// // })
+// // .filter(ee.Filter.gt('sum',278)) // remove grid cells with less algae than would equal one modis grid cell
+// // .select([]) // remove all properties
+// // // .limit(10).aside(print)
+
+
+// // get elevational histogram per grid cell
+// var medianElvAlgaeFC = dem_raw.updateMask(bigBlooms).reduceRegions({
+//   collection: smallGrid,
+//   reducer: ee.Reducer.median().combine({ 
+//     reducer2: ee.Reducer.mean(),
+//     sharedInputs: true
+//   }),
+//   scale: 100//,//dem is at this res
+//   // tileScale: 4
+// })//.aside(Map.addLayer,{},"elev ")
+
+// // should I split each grid cell on the mean, or median algal elevation?
+
+// // mk image of median elevation from grid cell image, 
+// // use as dem mask;
+
+// var medianElvAlgaeImage = medianElvAlgaeFC.reduceToImage({
+//   properties: ['median'],
+//   reducer: ee.Reducer.first()
+// }).rename('median_algae_elv')
+// // .aside(Map.addLayer, {},"as image")
+
+// var medianElvAlgaeMask=dem_raw.updateMask(bigBlooms).gt(medianElvAlgaeImage).rename('gt_median')
+// // .aside(Map.addLayer,{min:0, max:1, palette:['green','yellow']},"mask ")
+
+// // Export.image.toAsset({
+// //   image:medianElvAlgaeMask, 
+// //   description:"medianElvAlgaeMask",
+// //   assetId:"globalSnowAlgae/3_algaeMaps/medianElvAlgaeMask",// north america only
+// //   scale:100,
+// //   maxPixels:9e10
+// // })
+// var medianElvAlgaeMasked = dem_raw.updateMask(medianElvAlgaeMask)
+// // .aside(Map.addLayer,{min:1500, max:2500, palette:palettes.matplotlib.viridis[7]},"mask ")
+
+
+
+
+// // calculate ELA for select glaciers ------------------------------
+
+// var roi = greenland
+// var roiString = "greenland"
+// var pThresh = 0.5
+
+// // aug-sept s2 snow masks, min composite annual composite (4 images)
+// var myS2 = myFunctions.filterS2ForAlgae({
+//   roi: roi, // a simple geometry containing all glaciers
+//   startMonth: 7,
+//   endMonth: 9,
+//   startYear:2019,
+//   endYear:2022
+// });
+// // print(myS2.size(), "n s2 images") //
+
+
+// // combine images into weekly mosaics to reduce computational size
+// var millisInWeek = 1000*60*60*24*7
+// var milliList = ee.List.sequence(
+//   ee.Date('2019-07-01').millis(), 
+//   ee.Date('2022-09-30').millis(), 
+//   millisInWeek
+// )
+
+// var weeklyMosaics = ee.ImageCollection.fromImages(
+//   milliList.map(function (milli) {
+//     var date = ee.Date(milli);
+//     var images = myS2
+//       .filterDate(date, date.advance(7,'day')) 
+//       .sort('CLOUDY_PIXEL_PERCENTAGE', false); // clear images will be on top
+    
+//     var mosaic  = images.mosaic().set('system:time_start', milli)
+    
+//     return ee.Algorithms.If(images.size().neq(0), mosaic); // If avoids empty images
+// }))
+// // print(weeklyMosaics.size(),'n weekly mosaics')
+// // print(weeklyMosaics)
+// var trainingData = ee.FeatureCollection('projects/ee-caseyengstrom/assets/globalSnowAlgae/2_trainDat/train5')
+// var trainedClassifier = myFunctions.trainClassifier(trainingData);
+
+// var snowMasks = weeklyMosaics.map(function(image){
+//   image = myFunctions.normalizeBands(image);
+  
+//   // mask invalid pixels (clouds, saturated pixels, rockfall)
+//   var aerosolMask = image.select('AOT').lt(200)
+//   var cloudMask = image.select('MSK_CLDPRB').lt(10)
+//   var cloudMask2 = image.select('QA60').eq(0)
+//   var saturationMask = image.select('^B.*').lt(11000).reduce(ee.Reducer.min())
+//   var rockfallMask = image.select('GBND').lt(0.03)
+  
+//   var qc_mask = aerosolMask
+//     .and(cloudMask)
+//     .and(cloudMask2)
+//     .and(saturationMask)
+//     .and(rockfallMask) // return 1 iff all bands neq 0
+
+//   image = image.updateMask(qc_mask)
+
+//   // define qc'd snowmask
+//   var snowMask = image.select('NDSI').gt(0.65) 
+//     .and(image.select('B3').gt(5000)) // additional criteria to filter out dark ice pixels
+//     .rename('snow_mask')
+  
+//   var probability = image.classify(trainedClassifier, 'CLASS_PROB').rename('CLASS_PROB'); 
+//   var classMask = probability.gt(pThresh).rename('algae_mask');
+  
+//   return snowMask
+//     .addBands(classMask)
+//     .set('system:time_start', image.get('system:time_start'))
+// })
+// // print(snowMasks.first(), "snowMasks.first")
+
+// // minimum annual composite
+// // caution-- this could be affected by false negatives not caught by the QC mask
+// var yearList = ee.List.sequence(2019,2022,1)
+// var minComposites = ee.ImageCollection.fromImages(
+//   yearList.map(function (yr){
+//     var col= snowMasks
+//       .filter(ee.Filter.calendarRange(yr,yr,'year'))
+//     var snowmask = col.select('snow_mask').min().rename('snow_mask') // the minimum snow cover
+//     var algaemask = col.select('algae_mask').max().rename('algae_mask') // the maximum algal cover
+//     return snowmask.addBands(algaemask).set('year',yr)
+//   })
+// ).aside(print,'min annual composites')
+
+// // save intermediate images for Grenland and North America (otherwise memory timeout)
+// var yy = 2022
+// Export.image.toAsset({
+//   image: minComposites.filter(ee.Filter.eq('year',yy)).first(),
+//   description:roiString + yy +"algaemap",
+//   assetId: 'globalSnowAlgae/3_algaeMaps/'+ roiString + yy ,
+//   region: glaciers.filterBounds(roi).geometry(),//roi, complex geometries small area, vs simple geom but large area
+//   scale:50,
+//   crs:'EPSG:4326',
+//   maxPixels:1e10
+// })
+
+// // import intermediate images
+// var na19 = ee.Image('projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps/northAmerica2019')
+// var na20 = ee.Image('projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps/northAmerica2020')
+// var na21 = ee.Image('projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps/northAmerica2021')
+// var na22 = ee.Image('projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps/northAmerica2022')
+
+// var gr19 = ee.Image('projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps/greenland2019')
+// var gr20 = ee.Image('projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps/greenland2020')
+// var gr21 = ee.Image('projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps/greenland2021')
+// var gr22 = ee.Image('projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps/greenland2022')
+
+// var naCol = ee.ImageCollection([na19, na20, na21, na22]) 
+// var grCol = ee.ImageCollection([gr19, gr20, gr21, gr22])
+
+// // algaeImage area reducer per glacier within snowmask. 
+// var snowlineTable = grCol.map(function(i){
+//   var algaeMask = i.select('algae_mask')
+//   var snowMask = i.select('snow_mask')
+//   var algaeAboveELA = algaeMask.updateMask(snowMask)
+//   var algaeAboveELAArea = algaeAboveELA.multiply(ee.Image.pixelArea()).rename('algae_above_ela_area')
+//   var algaeArea = algaeMask.multiply(ee.Image.pixelArea()).rename('algae_area')
+//   var table = algaeAboveELAArea.addBands(algaeArea)
+//     .reduceRegions({
+//       collection: glaciers.filterBounds(roi),//SLOW: ~1300 complex geometries per image. 
+//       reducer: ee.Reducer.sum(),
+//       scale: 50,
+//       crs:'EPSG:4326'
+//     });
+//   return table.map(function(f){return f.set('year',i.get('year')).setGeometry(null)})
+// }).flatten()
+// .select(['glac_id', 'year','algae_above_ela_area', 'algae_area']) // where `sum` is the area (in m2) of algae above ELA
+
+// // print(snowlineTable.limit(3))
+// // Export.table.toDrive(snowlineTable, roiString + "_select_glacier_algae_above_ELA", "ELA")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// //SCRATCH
+//weekly elevation -------------------------------
+
+
+// // within the algae mask area
+// // mean RGND within each elevational band
+// // image collection filtering args
+
+// var naRangeList = ["alaska","chugatch","wrangellStElias","northCoast","southCoast",
+//                   "canadianRockies","northernRockies","mackenzie"]
+// var grRangeList = ["southwestGreenland","southeastGreenland","westCentralGreenland","eastCentralGreenland"]
+// var miscRangeList  =["norway","kamchatka"]
+// var myRegions = regions.filter(ee.Filter.inList('range',naRangeList))
+// var myGeom = myRegions.geometry()
+
+// var startDate = "2019-07-01"
+// var endDate = "2022-09-01"
+// var millisInWeek = 1000*60*60*24*7;
+// var milliList = ee.List.sequence(
+//   ee.Date(startDate).millis(), 
+//   ee.Date(endDate).millis(), 
+//   millisInWeek
+// )
+// var trainedClassifier = myFunctions.trainClassifier(trainingData);
+
+// var myS2 = myFunctions.filterS2ForAlgae({
+//   roi: myGeom,
+//   startMonth:7,
+//   endMonth:8,
+//   maxCloudCover: 65
+// }); // conditionally filters for summer depending on the hemisphere
+
+// // (2) make a low-cloud mosaic for each week in the list
+// var weeklyMosaics = ee.ImageCollection.fromImages(
+//   milliList.map(function (milli) {
+//     var date = ee.Date(milli);
+//     var images = myS2
+//       .filterDate(date, date.advance(7,'day')) 
+//       .sort('CLOUDY_PIXEL_PERCENTAGE', false); // clear images will be on top
+    
+//     var dateProperties = {
+//         'date': date.format("YYYY-MM-dd"), 
+//         'milli':milli
+//       };
+//     // if there are images in the specified date range, add the mosaic to the collection, 
+//     return ee.Algorithms.If(images.size().neq(0), images.mosaic().set(dateProperties));
+// }))
+
+// // (3) add classifier bands to weekly mosaics
+// // and get the probability at each point
+// var weeklyDem = weeklyMosaics.map(function(image){
+//   var date = image.get('date')
+//   var plusNDs = myFunctions.normalizeBands(image);
+//   var redMask = myFunctions.redSnowMask(plusNDs); // pre-processing step, mask non-red snow
+//   var maskedImage = plusNDs.updateMask(redMask).updateMask(algaeMask); // only within the previously defined algal ROI 
+//   var probability = maskedImage.classify(trainedClassifier, 'CLASS_PROB')
+//   var weeklyAlgaeMask = probability.gt(0.5).unmask()
+//   var demMasked = dem.select(['dem']).updateMask(weeklyAlgaeMask)
+  
+//   var rgndMasked = plusNDs.select('RGND').updateMask(weeklyAlgaeMask)
+//   return demMasked.set('date',date).addBands(rgndMasked) // get RGND dist also 
+// });
+  
+// // print(weeklyDem.first())
+
+// // get weekly histos for each region
+
+// var hists = weeklyDem.map(function(i){
+//   var hist = i.reduceRegions({
+//     reducer: ee.Reducer.autoHistogram(),
+//     collection: myRegions,
+//     scale: 100
+//   }).map(function(f){
+//     return f.set('date',i.get('date'))
+//   });
+//   return hist
+// }).flatten()
+// print(hists.limit(2))
+// Export.table.toDrive(hists, "weekly_dem_hists_northamerica_v"+map_version, "s2_classifier_map")
+
+// // easier to get mean RGND seperately
+
+
+// // snowline analysis --------------------
+
+// snow
+
+var glaciers = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/6_simpleGlims/1algaeGlaciers2")

@@ -1,0 +1,669 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var algaeMap = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/aaaatrainclean2F05"),
+    s2sr = ee.ImageCollection("COPERNICUS/S2_SR"),
+    dem = ee.Image("MERIT/DEM/v1_0_3"),
+    maxRgndDoyCompsAsset = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps3/maxRgndDoy"),
+    maxAnnCompsAsset = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps3/annualMaxCompsThresh02"),
+    forestPath = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/2_trainDat/trainclean2_trees"),
+    regions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/glacierRegionsV16"),
+    glacierImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages2/glacierImages2");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+
+
+
+code contains the temporal analysis for S2, including
+(1) algae area, and mean RGND per year
+      (export 4 intermediate images) -- 1 hr runtime each 
+      above and below max snowline (RGND*m^2)
+(2) n years with algae in pixel  (frequency)
+(3) DOY of max RGND
+(3a) DOY covariates elevation, lat, lon
+For S2 5 day mosaic time series, see 07_snowmelt script
+
+*/
+
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions')
+var palettes = require('users/gena/packages:palettes');
+
+
+var rangeList = ['alaskaRange','interiorNorth','interiorSouth','coastNorth','coastSouth']
+regions = regions.filter(ee.Filter.inList('name', rangeList)).aside(Map.addLayer)
+var thresh = 0.2  // classifier threshold
+
+
+// apply classifier to filtered image collection ---------------------------
+
+
+var maxDayDiff = 30 // the window to search for temporal interpolation
+var startMonth = 6
+var endMonth = 9
+var maxCC = 40 // max allowable cloud cover per image
+var maxSza = 80
+var minContigArea = 1*1000*1000 // 2 modis grid cells, 1 km2 -- only apply this for comparison with MODIS
+
+var glacierImage = glacierImages.mosaic()
+var glacierMask = glacierImage.unmask(0,false)
+// Map.addLayer(glacierMask, {min:0, max:1, palette:['black','white']}, 'glacier mask')
+
+algaeMap = algaeMap.select('CLASS').mosaic()
+//only apply this for comparison with MODIS
+var algaeMask = myFunctions.despeckle(algaeMap, minContigArea)
+algaeMask = algaeMask.unmask(0,false)
+
+// load precomputed decision trees
+		
+var decisionTrees = myFunctions.decodeFeatureCollection(forestPath)	
+var trainedClassifier = ee.Classifier.decisionTreeEnsemble(decisionTrees).setOutputMode('raw')				
+
+var myS2 = s2sr
+  .filterBounds(regions.geometry()) 
+  .filter(ee.Filter.calendarRange(startMonth, endMonth, 'month'))
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', maxCC)) // remove high cloud % images
+  .filter(ee.Filter.gt('SNOW_ICE_PERCENTAGE', 0.5)) // remove images lacking snow
+  .filter(ee.Filter.lt('MEAN_SOLAR_ZENITH_ANGLE', maxSza))
+// print(myS2.size(), ' n images')
+
+var areaImageKm2 = ee.Image.pixelArea().divide((1000*1000))
+
+
+// return the algal rgnd for an image, masked by classification
+function getAlgalRgnd(image){
+  var millis = image.date().millis()
+  image = image.updateMask(algaeMap)
+  var plusNDs = myFunctions.addNormalizedBands(image); 
+  var redMask = myFunctions.redSnowMask(plusNDs); // pre-processing step, mask non-red snow
+  var maskedImage = plusNDs.updateMask(redMask)
+
+  // for getting annual snowline
+  //   don't use the precomputed snowmask-- it excludes algae
+  var snow = plusNDs.select('NDSI').gt(0.65)// snow=1 
+  var iceMask = image.select('B3').gt(5000) // snow=1
+  snow = snow
+    .updateMask(iceMask)
+    .rename('SNOW')
+  
+  // using precomputed decision trees
+  var raw = maskedImage.classify(trainedClassifier, 'raw');
+  var probability = raw.arrayReduce(ee.Reducer.mean(), ee.List([0])).arrayGet(0).rename('CLASS_PROB')	// per pixel probability
+  var classification = probability.gt(thresh).rename('CLASS')
+  
+  var algalRgnd = plusNDs.select('RGND')
+    .updateMask(classification).rename('ALGAL_RGND') // only apply RGND within the classification mask
+
+  return algalRgnd
+    .addBands(snow)
+    .set('system:time_start', millis)
+}
+// print(getAlgalRgnd(myS2.first()),'check that ALGAL_RGND and SNOW bands present') // test
+
+var algalRgndS2 = myS2.map(getAlgalRgnd);
+
+
+
+
+
+
+// (1) annual max algal RGND composite --------------------------------------------
+
+var yrs = [2019,2020,2021,2022]
+
+var maxAnnComps = ee.ImageCollection.fromImages(yrs.map(function(y){
+  var thisYrsImgs = algalRgndS2.filter(ee.Filter.calendarRange(y,y,'year'))
+  var algaeMax = thisYrsImgs.select('ALGAL_RGND').max()
+  var snowMin = thisYrsImgs.select('SNOW').min() // the minimum snow cover in a given year
+  return algaeMax.addBands(snowMin).set('year',y)
+}))
+// Map.addLayer(maxAnnComps.first().select('ALGAL_RGND'), myFunctions.rgndVisParam, "algal rgnd 2019")
+
+// // code to export intermediate images to asset
+// var yy = 2022
+
+// Export.image.toAsset({
+//   image: maxAnnComps.filter(ee.Filter.eq('year',yy)).first(),
+//   description: yy+"MaxCompositeNorthAmerica",
+//   assetId: "globalSnowAlgae/3_algaeMaps3/" + yy + "northAmericaMaxCompThresh02NoArea",
+//   region:regions.geometry(),
+//   scale:50,
+//   maxPixels:1e13
+// })
+
+Map.addLayer(maxAnnCompsAsset.first())
+
+// // algal area (and above ELA)
+// var algalAreas = maxAnnCompsAsset.map(function(i){
+//   var snowMask = i.select('SNOW').unmask() // the maximum snowline elevation
+//   var algaeArea = i.select('ALGAL_RGND').gt(0).multiply(areaImageKm2).rename('ALGAL_AREA_KM2')
+//   var algaeAboveMaxSnowline = algaeArea.updateMask(snowMask).rename('ALGAL_AREA_ABOVE_SNOWLINE_KM2')
+  
+//   return algaeArea
+//     .addBands(algaeAboveMaxSnowline)
+//     .reduceRegions({
+//         collection: regions,
+//         reducer: ee.Reducer.sum(),
+//         scale: 50,
+//       }).map(function(f){
+//         return f.set('year',i.get('year')).setGeometry(null)
+//       })
+// }).flatten()
+// // print(algalAreas.first())
+// // Export.table.toDrive({
+// //   collection: algalAreas,
+// //   description: "algalAreas",
+// //   folder: "s2_temporal"
+// // })
+
+
+// mean annual max RGND within the glacier mask
+//snowline masks not working
+var annMaxRgndGlaciers = maxAnnCompsAsset.map(function(i){
+  var snowMask = i.select('SNOW').unmask(0,false)
+  var algalRgnd = i.select('ALGAL_RGND').unmask(0,false).updateMask(glacierMask).rename("ALGAL_RGND_GLACIERMASK")
+  // var algalRgndAboveELA = algalRgnd.updateMask(snowMask).rename('ALGAL_RGND_ABOVE_SNOWLINE')
+
+  return algalRgnd
+    .reduceRegions({
+      collection: regions,
+      reducer: myFunctions.myMeanReducer,
+      scale: 100
+    }).map(function(f){
+      return f.set('year',i.get('year')).setGeometry(null)
+    })
+}).flatten()
+print(annMaxRgndGlaciers.first(),'ann max rgnd in glacier mask')
+
+Export.table.toDrive({
+  collection: annMaxRgndGlaciers,
+  description: "annMaxRgndGlaciermask",
+  folder: "s2_temporal",
+  selectors:['name','year','mean','stdDev','count']
+})
+
+
+var annMaxRgndWithinAlgaeMask = maxAnnCompsAsset.map(function(i){
+  var algalRgnd2 = i.select('ALGAL_RGND').unmask(0,false).updateMask(algaeMask).rename('ALGAL_RGND_ALGAEMASK')
+
+  return algalRgnd2
+    .reduceRegions({
+      collection: regions,
+      reducer: myFunctions.myMeanReducer,
+      scale: 100
+    }).map(function(f){
+      return f.set('year',i.get('year')).setGeometry(null)
+    })
+}).flatten()
+
+Export.table.toDrive({
+  collection: annMaxRgndWithinAlgaeMask,
+  description: "annMaxRgndAlgaemask",
+  folder: "s2_temporal",
+  selectors:['name','year','mean','stdDev','count']
+})
+
+
+
+
+
+
+// (2) n years with algae in pixel (frequency) -----------------------------
+
+var freqMap = maxAnnCompsAsset.select('ALGAL_RGND').map(function(image){
+  return image.gt(0)
+}).sum()
+// Map.addLayer(freqMap, {min:1, max:4, palette:palettes.matplotlib.viridis[7]}, "freq map")
+
+// get the area with algae recurring in 1, 2 3 yrs 
+var freqMapBands = freqMap.eq(ee.Image.constant(ee.List([1,2,3,4]))).multiply(areaImageKm2)
+print(freqMapBands) // an image
+
+var freqAreas = freqMapBands.reduceRegions({
+  collection:regions,
+  reducer: ee.Reducer.sum(),// the sum of area, in km2
+  scale: 50
+})
+
+Export.table.toDrive({
+  collection: freqAreas,
+  description: "freqAreas",
+  folder: "s2_temporal"
+})
+
+
+// export data for frequency map
+var gridSize = 10000
+var myProj = myFunctions.makeAeaProj([-137, 52],[50, 60]) // centered on northwestern north america
+var grid = regions.geometry()
+  .coveringGrid(myProj, gridSize) 
+// Map.addLayer(grid,{}, "grid")
+var freqGrid = freqMap.reduceRegions({
+  collection: grid,
+  reducer: ee.Reducer.mean().combine({
+    reducer2: ee.Reducer.count(), // non-null
+    sharedInputs: true
+  }), 
+  scale: 50,
+  tileScale:1
+}).filter(ee.Filter.gt('count',100))// must be at least 100 50m pixels per grid cell 
+// Map.addLayer(freqGrid)
+Export.table.toDrive({
+  collection: freqGrid, 
+  description: "freqMapPixCountGt100",
+  folder: "s2_temporal",
+  fileFormat: "KML" 
+})
+
+
+
+
+
+
+// (3) doy max rgnd --------------------------------------------
+// algalRGNDS2 is masked by classifier, so this only includes pixels labelled as "Algal"
+var maxDoyScale = 50
+
+
+function makeDoyImage(i){
+  var doy = i.date().getRelative('day','year').toInt() 
+  var doyImage = ee.Image.constant(doy).toInt16().rename('DOY')
+  return i.addBands(doyImage)
+}
+
+var algalRgndPlusDoy = algalRgndS2.map(makeDoyImage)
+// print(algalRgndPlus.first(),'DOY band present?') //test
+
+
+// only for pixels classified as algae
+var maxRgndDoyComps = ee.ImageCollection.fromImages(yrs.map(function(y){
+  var thisYearsImages = algalRgndPlusDoy
+    .filter(ee.Filter.calendarRange(y,y,'year'))
+  
+  return thisYearsImages
+    .qualityMosaic('ALGAL_RGND')
+    .select('DOY').rename('max_rgnd_doy')
+    .set('year',y)
+}))
+// print(maxRgndDoyComps.size(),'maxRgndDoyComps.size()==4?') // test, should return 4
+// Map.addLayer(maxRgndDoyComps.filter(ee.Filter.eq('year',2020)).first(),
+//   {min:182, max:244, palette:palettes.matplotlib.viridis[7]}, "max rgnd doy")
+
+
+// // code to export intermediate images to asset
+// var yz = 2022
+
+// Export.image.toAsset({
+//   image: maxRgndDoyComps.filter(ee.Filter.eq('year',yz)).first(),
+//   description: "maxRgndDoyImage"+yz,
+//   assetId: "globalSnowAlgae/3_algaeMaps3/maxRgndDoy"+yz,
+//   region:regions.geometry(),
+//   scale:100,
+//   maxPixels:1e13
+// })
+
+// summarise
+var maxRgndDoyStats = maxRgndDoyCompsAsset.map(function(i){
+  return i.reduceRegions({
+    collection: regions,
+    reducer: myFunctions.myMeanReducer,
+    scale: maxDoyScale,
+    tileScale:1
+  }).map(function(f){return f.set('year',i.get('year'))})
+}).flatten()
+
+Export.table.toDrive({
+  collection: maxRgndDoyStats,
+  description: "meanMaxRgndDoyStats",
+  folder: "s2_temporal"
+})
+
+
+
+
+
+// (3a) max rgnd doy vs latitude, elevation (pixel data ) --------------------------------------------
+
+
+// Map.addLayer(dem,{min:2100,max:2600,palette:palettes.matplotlib.viridis[7]}, "max rgnd doy")
+var lonLatImage = ee.Image.pixelLonLat()
+
+var covs = maxRgndDoyCompsAsset.map(function(i){
+  return i.addBands(lonLatImage).addBands(dem)
+})
+// print(covs.first(),'covs.first()')
+
+// data for per pixel data multivariate regression
+// numeric ids: 1,   2,3,   4,5
+// alaska,  coast north,coast south,  inter north,interior south
+
+var regionImage = regions
+  .map(function(f){
+    var idnum = ee.Number.parse(f.id())
+    return f.set('idnum',idnum)
+  }).reduceToImage(['idnum'],ee.Reducer.first())
+  .rename('region_id')
+  .toInt8()
+  .aside(Map.addLayer)
+  .aside(print)
+  
+var covTable = covs.map(function(i){
+  return i.addBands(regionImage) 
+    .stratifiedSample({
+      numPoints:500,
+      classBand:'region_id',
+      scale:200,
+      seed:123
+    }).map(function(f){return f.set('year',i.get('year'))})
+}).flatten()
+// because the RGND DOY map is one of the bands, the sampling will automatically mask to only within the max DOY band
+print(covTable.limit(10))
+Export.table.toDrive({
+  collection: covTable,
+  description: "maxRgndDoyPredictorsStrat",
+  folder: "s2_temporal"
+})
+
+
+
+
+
+
+
+// scratch -----------------------------------
+
+// // (4) s2 algal rgnd weekly mosaic time series ---------------------------
+// var interpScale = 500 // ok to ignore the small blooms here
+
+// var millisInDay = 1000*60*60*24
+// var dayMilliList = ee.List.sequence(
+//   ee.Date('2019-06-01').millis(), 
+//   ee.Date('2022-09-30').millis(), 
+//   millisInDay
+// )
+
+// var dayMosaics = ee.ImageCollection.fromImages(
+//   dayMilliList.map(function (milli) {
+//     var date = ee.Date(milli);
+//     var images = myS2
+//       .filterDate(date, date.advance(1,'day')) 
+//       .sort('CLOUDY_PIXEL_PERCENTAGE', false); // clear images will be on top
+    
+//     var dateProperties = {
+//         'millis':milli,
+//         'system:time_start': milli,
+//         'date': date.format("YYYY-MM-dd"),
+//         'year': ee.Number.parse(date.format("YYYY")).toFloat(), // to match year in ela_masks
+//       };
+//     var mosaic  = images.mosaic().set(dateProperties)
+      
+//     return ee.Algorithms.If(images.size().neq(0), mosaic); // If avoids empty images
+// }))
+// // print(mosaics.size(), "n mosaics") 
+// var dayMosaicsClassi = dayMosaics.map(getAlgalRgnd);
+
+// // add a timestamp band
+// var algalRgndPlus = dayMosaicsClassi.map(function(image) {
+//   image = ee.Image(image)
+//   var timeImage = image.metadata('millis').rename('timestamp')
+//   return image.addBands(timeImage)
+// }).sort('millis',true)
+// // print(algalRgndPlus.first())
+
+// var algalRgndRev  = algalRgndPlus.sort('millis', false)
+
+
+// var interpolateImages = function(image) {
+//   image = ee.Image(image)
+//   var today = ee.Date(image.get('system:time_start'))
+//   // for the first image, before mosaic is equal to the first image (end date is exclusive)
+//   var beforeMosaic = algalRgndRev.filterDate(today.advance(-maxDayDiff, "day"), today.advance(1,"day")).mosaic()
+//   var afterMosaic  = algalRgndPlus.filterDate(today, today.advance(maxDayDiff, "day")).mosaic()
+
+//   var t1 = beforeMosaic.select('timestamp').rename('t1')
+//   var t2 = afterMosaic.select('timestamp').rename('t2')
+
+//   var t = image.metadata('system:time_start').rename('t')
+
+//   var timeImage = ee.Image.cat([t1, t2, t])
+
+//   var timeRatio = timeImage.expression('(t - t1) / (t2 - t1)', {
+//     't': timeImage.select('t'),
+//     't1': timeImage.select('t1'),
+//     't2': timeImage.select('t2'),
+//   })
+
+//   var interpolated = beforeMosaic
+//     .add((afterMosaic.subtract(beforeMosaic).multiply(timeRatio)))
+
+//   var result = image.unmask(interpolated) // only replace masked pixels with interp vals
+    
+//   return result.copyProperties(image)
+// }
+
+// var interpolatedCol = ee.ImageCollection(algalRgndPlus.map(interpolateImages))
+// // print(interpolatedCol.first()) // UMLE error
+
+
+// var tsInterp = interpolatedCol 
+// .map(function(i){
+//   return i.reduceRegions({
+//     collection: regions,
+//     reducer: ee.Reducer.sum(), // the biomass 
+//     scale:interpScale,
+//     tileScale: 8
+//   }).map(function(f){
+//     return f.set('date',i.get('date'))
+//   })
+// }).flatten()
+// // print(tsInterp.first())
+
+
+// Export.table.toDrive({
+//   collection: tsInterp,
+//   description: "dailyRgndSums",
+//   folder: "s2_temporal"
+// })
+
+
+
+
+// // algal RGND weekly mosaic time series------------------------------------------------
+
+// var millisInWeek = millisInDay*7
+// var milliList = ee.List.sequence(
+//   ee.Date('2019-06-01').millis(), 
+//   ee.Date('2022-09-30').millis(), 
+//   millisInWeek
+// )
+
+// var mosaics = ee.ImageCollection.fromImages(
+//   milliList.map(function (milli) {
+//     var date = ee.Date(milli);
+//     var images = myS2
+//       .filterDate(date, date.advance(1,'day')) 
+//       .sort('CLOUDY_PIXEL_PERCENTAGE', false); // clear images will be on top
+    
+//     var dateProperties = {
+//         'millis':milli,
+//         'date': date.format("YYYY-MM-dd"),
+//         'year': ee.Number.parse(date.format("YYYY")).toFloat(), // to match year in ela_masks
+//       };
+//     var mosaic  = images.mosaic().set(dateProperties)
+    
+//     return ee.Algorithms.If(images.size().neq(0), mosaic); // If avoids empty images
+// }))
+// // print(mosaics.size(), "n mosaics") 
+// var mosaicsClassi = mosaics.map(getAlgalRgnd);
+// // print(mosaicsClassi.first())
+
+// var ts = mosaicsClassi.map(function(i){
+//   return i.reduceRegions({
+//     collection: regions,
+//     reducer: ee.Reducer.sum(),
+//     scale: 50,
+//     tileScale: 2
+//   }).map(function(f){
+//     return f.set('date',i.get('date'))
+//   })
+// }).flatten()
+// // print(ts.first())
+
+
+// Export.table.toDrive({
+//   collection: ts,
+//   description: "weeklyMosaicRgndSums",
+//   folder: "s2_temporal"
+// })
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// // doy of first, last detection------------------------------------------------
+
+// var algalRgndMskd =  algalRgndPlus.map(function(i){
+//   var msk = i.select('ALGAL_RGND').gt(0).unmask()
+//   return i.select('doy').updateMask(msk)
+// })
+
+// var minDoyComps = ee.ImageCollection.fromImages(yrs.map(function(y){
+//   var thisYearsImages = algalRgndMskd
+//     .filter(ee.Filter.calendarRange(y,y,'year'))
+
+//   return thisYearsImages.min().rename('min_doy').set('year',y)
+// }))
+// // print(minDoyComps) // test
+// // Map.addLayer(minDoyComps.first(),{min:182, max:244, palette:palettes.matplotlib.viridis[7]}, "min doy")
+
+// //summarise
+// var meanMinDoyStats = minDoyComps.mean() // the 4 year mean 
+//   .reduceRegions({
+//     collection: regions,
+//     reducer: ee.Reducer.mean().combine({
+//       reducer2: ee.Reducer.stdDev(),
+//       sharedInputs: true
+//     }),
+//     scale: 50,
+//     tileScale: 4
+//   })
+
+// Export.table.toDrive({
+//   collection: meanMinDoyStats,
+//   description: "meanMinDoyStats",
+//   folder: "s2_temporal",
+//   fileNamePrefix: "meanMinDoyStats"
+// })
+
+// var minDoyStats = minDoyComps.min()
+//   .reduceRegions({
+//     collection: regions,
+//     reducer: ee.Reducer.min(),
+//     scale: 50,
+//     tileScale: 4
+//   })
+
+// Export.table.toDrive({
+//   collection: minDoyStats,
+//   description: "minDoyStats",
+//   folder: "s2_temporal",
+//   fileNamePrefix: "minDoyStats"
+// })
+
+
+
+// var maxDoyComps = ee.ImageCollection.fromImages(yrs.map(function(y){
+//   var thisYearsImages = algalRgndMskd
+//     .filter(ee.Filter.calendarRange(y,y,'year'))
+
+//   return thisYearsImages.max().rename('max_doy').set('year',y)
+// }))
+// // Map.addLayer(maxDoyComps.first(),{min:182, max:244, palette:palettes.matplotlib.viridis[7]}, "max doy")
+
+
+// // summarise
+// var meanMaxDoyStats = maxDoyComps.mean() // the 4 year mean 
+//   .reduceRegions({
+//     collection: regions,
+//     reducer: ee.Reducer.mean().combine({
+//       reducer2: ee.Reducer.stdDev(),
+//       sharedInputs: true
+//     }),
+//     scale: 50,
+//     tileScale: 4
+//   })
+
+// Export.table.toDrive({
+//   collection: meanMaxDoyStats,
+//   description: "meanMaxDoyStats",
+//   folder: "s2_temporal",
+//   fileNamePrefix: "meanMaxDoyStats"
+// })
+
+// var maxDoyStats = maxDoyComps.max()
+//   .reduceRegions({
+//     collection: regions,
+//     reducer: ee.Reducer.max(),
+//     scale: 50,
+//     tileScale: 4
+//   })
+
+// Export.table.toDrive({
+//   collection: maxDoyStats,
+//   description: "maxDoyStats",
+//   folder: "s2_temporal",
+//   fileNamePrefix: "maxDoyStats"
+// })
+
+
+
+// scratch ------------------------------
+// var maxDiffFilter = ee.Filter.maxDifference({
+//   difference: maxDayDiff,
+//   leftField: 'millis',
+//   rightField: 'millis'
+// })
+// var lessEqFilter = ee.Filter.lessThanOrEquals({
+//   leftField: 'millis',
+//   rightField: 'millis'
+// })
+// var greaterEqFilter = ee.Filter.greaterThanOrEquals({
+//   leftField: 'millis',
+//   rightField: 'millis'
+// })
+
+// // join images prior to the image date
+// var filter1 = ee.Filter.and(maxDiffFilter, lessEqFilter)
+// var join1 = ee.Join.saveAll({
+//   matchesKey: 'after',
+//   ordering: 'millis',
+//   ascending: false})//the nearest-date image will be on top
+// var join1Result = join1.apply({
+//   primary: algalRgndPlus,
+//   secondary: algalRgndPlus,
+//   condition: filter1
+// })
+// // print(join1Result.first())
+
+// // join images after the image date
+// var filter2 = ee.Filter.and(maxDiffFilter, greaterEqFilter)
+// var join2 = ee.Join.saveAll({
+//   matchesKey: 'before',
+//   ordering: 'millis',
+//   ascending: true}) // the nearest-date image will be on top
+// var join2Result = join2.apply({
+//   primary: join1Result,
+//   secondary: join1Result,
+//   condition: filter2
+// })
+// // print(join2Result.first())
+// // print(join2Result.aggregate_array('date'))

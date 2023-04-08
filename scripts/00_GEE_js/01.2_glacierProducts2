@@ -1,0 +1,274 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var glims = ee.FeatureCollection("GLIMS/current"),
+    landcover = ee.ImageCollection("COPERNICUS/Landcover/100m/Proba-V-C3/Global"),
+    isGrisMask = 
+    /* color: #d63000 */
+    /* shown: false */
+    ee.Geometry.Polygon(
+        [[[-37.98012597854733, 65.79570028487142],
+          [-34.05829780159027, 66.39683746988032],
+          [-32.059720863246, 68.6912096044384],
+          [-31.073116475979663, 69.1691896344875],
+          [-30.389140124866326, 69.95432455738839],
+          [-24.88673562033243, 72.01092103798298],
+          [-26.6897628166546, 73.34166579652607],
+          [-25.971461173321746, 73.69619239880741],
+          [-24.135653355950417, 73.73464914361574],
+          [-22.093508247873995, 73.97436375563385],
+          [-21.29102097675526, 77.4991415497951],
+          [-21.291144633924763, 77.5560155467972],
+          [-21.598356486560377, 77.54652335738706],
+          [-22.1022959997955, 77.61770616156582],
+          [-22.56405612876162, 77.60309052529031],
+          [-22.563997774393236, 77.574791656888],
+          [-23.134526872472627, 77.55583682767802],
+          [-23.39760644066091, 77.4227080560285],
+          [-23.497394170468528, 77.5691879698241],
+          [-23.35336859192274, 77.23982435701889],
+          [-23.53742491588053, 76.97703501022123],
+          [-23.852714866661962, 76.80966809956773],
+          [-24.573827125459996, 76.47083463111043],
+          [-24.253892511100304, 76.05436225023215],
+          [-24.205901703720894, 75.61726403828408],
+          [-27.871133207294584, 75.50484514768185],
+          [-29.54290157186455, 78.00124757273161],
+          [-34.58966791912281, 77.9369733653871],
+          [-41.172418283609815, 77.8262982813144],
+          [-51.178445094219875, 77.75228293525193],
+          [-57.54195806620014, 77.83620965608473],
+          [-62.632471031517056, 78.06572068889237],
+          [-63.6364997522314, 77.95668339761185],
+          [-64.85895001404249, 77.95820801949817],
+          [-65.70555893686192, 77.7535288804888],
+          [-65.92511522691858, 77.71625939376199],
+          [-65.92529081788335, 77.65072153095328],
+          [-66.09206020448325, 77.5036689593207],
+          [-66.12819419500761, 77.40844841992458],
+          [-66.34608222701695, 77.3129187893224],
+          [-66.58371681765655, 77.04089516646368],
+          [-68.06674874299479, 76.62573296019247],
+          [-67.74816085749309, 76.33038321454315],
+          [-66.8201911489711, 76.23484127407616],
+          [-67.11452372400129, 75.9598607906523],
+          [-60.66201033413114, 75.69039782576385],
+          [-54.094077502251146, 72.33602855708581],
+          [-51.28545137357274, 69.52944689240417],
+          [-51.388807485284374, 67.70930136217896],
+          [-50.83162431133391, 66.4152019485521],
+          [-51.711348979990326, 61.261209171538226],
+          [-43.5419417519087, 59.70318685579957]]]),
+    regions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/glacierRegionsV16");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+Create a image (mask) of GLIMS glaciers worldwide
+also define a 100 km buffer of the edge of the greenland ice sheet (non overlapping with the glims glaciers)
+runtime: ~30 min per image
+
+try decreasing to 1 km, exports faster
+export andes and NZ separately
+*/ 
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions')
+
+var regionName = "altai" // sets export description and asset ID
+var rangeList = // choose the regions to include in this map
+// ["coastNorth","coastSouth","interiorNorth","interiorSouth","alaskaRange", "alaskaPeninsula","cascades","brooks"]
+// ['ellesmere','baffin']
+// ['svalbard','russianArctic'] 
+// ['newZealand']
+// ['andes']
+// ['antarcticaNoSheet']
+// ["southwestGreenland","southeastGreenland", "eastCentralGreenland", "westCentralGreenland", "northeastGreenland", "northGreenland", "northwestGreenland"]
+
+// ["norwaySouth", "norwayNorth"]
+// ["alps"]
+// ["iceland"] 
+// ['caucasus']
+// 
+// ['altai']
+['highMtnAsia']
+// ['kamchatka']
+
+
+
+
+
+var version = 4
+var minSize = 1 // min area of glaciers, in km2
+
+
+// manually define ROI to hand drawn "greenland" polygon for greenland, and make sure to merge with GrIS
+// Map.addLayer(regions,{},"regions",false)
+var roi = regions.filter(ee.Filter.inList("name", rangeList)).geometry()
+// Map.addLayer(roi,{},"ROI")
+
+
+var glaciers = glims
+  .filterBounds(roi)
+  // .distinct('glac_id')
+  .filter(ee.Filter.gt('db_area', minSize)) // exclude glaciers < 1 km2
+Map.addLayer(glaciers,{},'glaciers>1km2 in ROI')
+
+var glacierImage = glaciers
+  .map(function(f){return f.set('foo',1)})
+  .reduceToImage(['foo'],ee.Reducer.first()).rename('glacier')
+  .selfMask()
+Map.addLayer(glacierImage,{min:0, max:1},"glacier image")
+
+
+// // greenland ice sheet:
+
+// // the starting mask from COPERNICUS
+// var grisMask = landcover.select('discrete_classification').mosaic().eq(70)
+// // exclude the GLIMS glaciers
+// var iceCapMask = glacierImage.unmask(0,false).not().aside(Map.addLayer,{},'iceCapMask')
+// var gg1 = grisMask.updateMask(iceCapMask).unmask(0,false)
+// // Map.addLayer(gg1,{min:0, max:1},"glacier image CAPS MASKED")
+
+// // buffer within 100 km of edge
+// var buffDist = 100*1000 
+// var boxcar = ee.Kernel.square({
+//   radius: buffDist, units: 'meters', normalize: true
+// });
+// var gradient = gg1.convolve(boxcar);
+// // Map.addLayer(gradient,{},"gradient")
+// var mask = gradient.lt(0.99)
+// var gg2 = gg1.updateMask(mask).selfMask().rename('glacier')
+// Map.addLayer(gg2, {}, 'centerMasked');
+
+
+// // make the small patches go away
+// var gg3 = myFunctions.despeckle(gg2,1000*1000)
+// Map.addLayer(gg3, {}, 'no speckles');
+
+// // mask within greenland, exclude the strip at top
+// var mask2 = ee.Image.constant(1).clip(isGrisMask).unmask(0,false)
+// Map.addLayer(mask2,{},'mask2')
+// var gg4 = gg3.updateMask(mask2).aside(Map.addLayer, {}, "post mask2")
+
+
+var exportRes = 100//1000 to allow despeckler to succeed
+Export.image.toAsset({
+  image: glacierImage.set('name',regionName), 
+  description: "glacierImg_" + regionName + "_" + version, 
+  assetId: 'globalSnowAlgae/1_glacierImages2/' + regionName + "_" + version,
+  scale: exportRes,
+  region: roi, 
+  maxPixels: 1e13
+})
+
+
+
+
+
+// Export.image.toDrive({
+//   image: glacierImage,
+//   description: "glacier_image_to_drive_1000",
+//   folder: 'sa_biogeography',
+//   scale: 1000,
+//   region: roi
+// })
+
+// glacier UID images ---------------------------
+var myGlims = glims
+  .filter(ee.Filter.gt('db_area', 1))
+  .filter(ee.Filter.neq('chief_affl','Manchester Metropolitan University'))
+  .filter(ee.Filter.neq('chief_affl','University of Zurich-Irchel'))
+  .filter(ee.Filter.neq('chief_affl','University of Washington')) // obviously wrong polygons
+  .distinct(['glac_id'])// remove duplicates
+  // filter out duplicate entries missed by the distinct() function
+  .filter(ee.Filter.neq('glac_id','G235219E57822N')) // northern rockies 
+  .filter(ee.Filter.neq('glac_id','G229968E56437N'))
+  .sort('glac_id') // in case of overlap, at least always be consistent
+  .map(function(f){return f.simplify(50)})
+  
+// // look for overlapping glacier boundaries
+// var intersect = function(feature){
+
+//   var fc = myGlims.filterBounds(feature.geometry()).map(function(f){
+//     var intersects = feature.geometry().intersects(f.geometry())
+//     return(f.set({intersects: intersects}))
+//   })
+//   // aggregate the "intersects" to an array and get the frequency of TRUE.
+//   // Add that result as a property to the feature.  Any overlaps greater than 1
+//   // means the feature overlaps with a different feature.
+//   var status = ee.List(fc.aggregate_array("intersects")).frequency(true)
+//   return(feature.set({overlaps: status}))
+// }
+// myGlims = myGlims.map(intersect)
+
+// Map.addLayer(myGlims)
+
+var uidGlacierImage = myGlims
+  .map(function(f){
+    var glacId = f.getString('glac_id')
+    var numId = ee.Number.parse(ee.String(glacId.slice(1,7)) // will remove leading 0s
+      .cat(ee.String(glacId.slice(8,13))))
+    return f.set('new_id',numId)
+  })
+  .reduceToImage({
+    properties: ['new_id'],
+    reducer: ee.Reducer.first()
+  }).rename('glac_id')
+// print(uidGlacierImage)
+// Map.addLayer(uidGlacierImage)
+
+
+// // andes, antarctica, arctic, caucasus, greenland, europe, highMtnAsia, kamchatka, newZealand, northAmerica
+// var exportRoi = northAmerica
+// var exportRoiName = exportRoi.get('region').getInfo()
+
+// Export.image.toAsset({
+//   image: uidGlacierImage,
+//   description: "uidGlacImage" + exportRoiName,
+//   assetId: "globalSnowAlgae/1_glacierImages/uid_" + exportRoiName,
+//   region:exportRoi,
+//   scale:100, 
+//   crs:'EPSG:4326',
+//   maxPixels:1e13
+// })
+
+
+// // generate simplified glacier polygons---------------------------
+// // done manually, per region 
+// var scale = 100 //m
+// var basename = 'wrangellStElias'
+
+
+// // var rangeList = ['kamchatka']
+// var roi = regions.filter(ee.Filter.eq('range', basename)).geometry()
+// // var roi = regions.filter(ee.Filter.eq('region',basename)).geometry()
+// //   .aside(Map.addLayer)
+
+// var myGlims  = glims
+//   .filterBounds(roi)
+//   .filter(ee.Filter.gt('db_area', 1)) //gt 1 km2
+//   .filter(ee.Filter.neq('chief_affl','Manchester Metropolitan University'))
+//   .filter(ee.Filter.neq('chief_affl','University of Zurich-Irchel'))
+//   .filter(ee.Filter.neq('chief_affl','University of Washington')) // obviously wrong polygons
+//   .distinct(['glac_id'])// remove duplicates
+//   // filter out duplicate entries missed by the distinct() function
+//   .filter(ee.Filter.neq('glac_id','G235219E57822N')) // northern rockies 
+//   .filter(ee.Filter.neq('glac_id','G229968E56437N'))
+//   .filter(ee.Filter.eq('glac_id', 'G217991E60521N')) //Bering Glacier causes issues for some reason
+//   // still some duplicates in alaska will do another round QC after selecting the algae glaciers... 
+//   .map(function(f){return ee.Feature(f).simplify(scale)}) 
+//   .aside(Map.addLayer, {color:'black'}, "simple glims")
+//   // remove linestrings from geometries
+
+
+
+// // print(myGlims.sort('area',false).limit(100))
+// var output_dir= "globalSnowAlgae/6_simpleGlims/"
+// // Export.table.toAsset(myGlims, basename, output_dir + basename)
+
+
+
+
+
+Map.setOptions('dark',{
+  'dark': [
+    { 'elementType': 'labels', 'stylers': [ { 'visibility': 'off' } ] },
+    { 'elementType': 'geometry', 'stylers': [ { 'color': '#808080' } ] },
+    { 'featureType': 'water',  'stylers': [ { 'color': '#404040' } ] }
+  ]
+})

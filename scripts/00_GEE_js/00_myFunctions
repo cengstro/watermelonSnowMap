@@ -1,0 +1,899 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var north = 
+    /* color: #d63000 */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-177.4630000934638, 83.80269077059766],
+          [-177.4630000934638, 1.1531489734276243],
+          [174.71473428153618, 1.1531489734276243],
+          [174.71473428153618, 83.80269077059766]]], null, false),
+    s2sr_harm = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED"),
+    s2sr = ee.ImageCollection("COPERNICUS/S2_SR"),
+    train2 = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/training/clean_train_2"),
+    train3 = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/2_trainDat/train3"),
+    train = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/2_trainDat/na6_2");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/* 
+functions
+define defaults
+
+*/
+
+var rgndVisParam={
+  palette:['ffffff','ff0000'],
+  min:0,max:0.1
+}
+var rgbVisParam = {
+  bands: ["B4","B3","B2"],
+  gamma: 0.3,
+  max: 11000
+}
+var modisRgbVisParam = {
+  bands: ["sur_refl_b01","sur_refl_b04","sur_refl_b03"],
+  gamma: 0.3,
+  min:0,
+  max: 5500
+}
+
+var classProbVisParam = {
+  palette: ['blue', 'white','red'],
+  min:0,
+  max:1
+}
+var classVisParam = {
+  palette: ['blue','red'],
+  min:0,
+  max:1
+}
+
+
+var l8RgbVisParam = {
+  bands: ['SR_B4', 'SR_B3','SR_B2'],
+  min:0,
+  max:50000,
+  gamma:0.3
+}
+exports.l8RgbVisParam=l8RgbVisParam
+
+var filterS2ForAlgae = function(args){
+  var roi = args.roi 
+  var startYear = args.startYear || 2019 // some 2017 lacks MSK_CLDPRB
+  var endYear = args.endYear || 2022
+  var maxCloudCover = args.maxCloudCover || 40 // 40%
+  var minSnowPercent = args.minSnowPercent || 0.5 // thats 0.5%, not 50%
+  var maxSZA = args.maxSZA || 90
+  
+  var summerS2 = ee.Algorithms.If({
+    condition: roi.containedIn(north, 100000),
+    trueCase: s2sr.filter(ee.Filter.calendarRange(7, 8, 'month')),
+    falseCase: s2sr.filter(ee.Filter.calendarRange(1,2,'month'))
+  })
+
+  return ee.ImageCollection(summerS2)
+    .filterBounds(roi) // a complex polygon can be computationally expensive
+    .filter(ee.Filter.calendarRange(startYear, endYear, 'year'))
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', maxCloudCover)) // remove high cloud % images
+    .filter(ee.Filter.gt('SNOW_ICE_PERCENTAGE', minSnowPercent)) // remove images lacking snow
+    .filter(ee.Filter.lt('MEAN_SOLAR_ZENITH_ANGLE', maxSZA)) // remove images where sun low in sky
+}
+// print(filterS2ForAlgae(geometry).limit(10))
+// print('filterS2ForAlgae', filterS2ForAlgae(geometry).size())
+
+
+// S2
+function addNormalizedBands(image, full){
+  full = full || true // default adds all bands
+  
+  image = ee.Image(image)
+  
+  var NDSI = image.normalizedDifference(['B3','B11']).rename('NDSI')
+  var RGND = image.normalizedDifference(['B4','B3']).rename('RGND')
+  var GBND = image.normalizedDifference(['B3','B2']).rename('GBND')
+  
+  var imagePlus = image
+    .addBands(RGND)
+    .addBands(NDSI)
+    .addBands(GBND)
+  
+  var ND2_1 = image.normalizedDifference(['B2','B1']).rename('ND2_1')
+  var ND2_11 = image.normalizedDifference(['B2','B11']).rename('ND2_11')
+  var ND2_12 = image.normalizedDifference(['B2','B12']).rename('ND2_12')
+  var ND5_2 = image.normalizedDifference(['B5','B2']).rename('ND5_2')
+  var ND6_2 = image.normalizedDifference(['B6','B2']).rename('ND6_2')
+  var ND5_3 = image.normalizedDifference(['B5','B3']).rename('ND5_3')
+  var ND4_2 = image.normalizedDifference(['B4','B2']).rename('ND4_2')
+  var ND2_8A = image.normalizedDifference(['B2','B8A']).rename('ND2_8A')
+  var ND2_9 = image.normalizedDifference(['B2','B9']).rename('ND2_9')
+  var ND5_6 = image.normalizedDifference(['B5','B6']).rename('ND5_6')
+  var ND4_8 = image.normalizedDifference(['B4','B8']).rename('ND4_8')
+  var ND2_7 = image.normalizedDifference(['B2','B7']).rename('ND2_7')
+  var ND5_4 = image.normalizedDifference(['B5','B4']).rename('ND5_4')
+  var ND6_3 = image.normalizedDifference(['B6','B3']).rename('ND6_3')
+  var ND2_8 = image.normalizedDifference(['B2','B8']).rename('ND2_8')
+  var ND4_6 = image.normalizedDifference(['B4','B6']).rename('ND4_6')
+  
+  
+  var result = ee.Algorithms.If({
+    condition: full,
+    trueCase: imagePlus
+      .addBands(ND2_1)
+      .addBands(ND2_11)
+      .addBands(ND2_12)
+      .addBands(ND5_2)
+      .addBands(ND6_2)
+      .addBands(ND5_3)
+      .addBands(ND4_2)
+      .addBands(ND2_8A)
+      .addBands(ND2_9)
+      .addBands(ND5_6)
+      .addBands(ND4_8)
+      .addBands(ND2_7)
+      .addBands(ND5_4)
+      .addBands(ND6_3)
+      .addBands(ND2_8)
+      .addBands(ND4_6),
+    falseCase: imagePlus
+  })
+  return ee.Image(result)
+}
+// print(normalizeBands(s2sr.first(), false).bandNames())
+
+// returns a red snow mask (but does not apply it)
+// NDSI, RGND, and GBND must be already added to image
+var redSnowMask = function(image, ndsiThresh, saturationThresh, rgndThresh, 
+                                  gbndThresh, b3Thresh, aerosolThresh, swirThresh, 
+                                  cloudProbThresh){
+  ndsiThresh = ndsiThresh || 0.65
+  saturationThresh = saturationThresh || 11000
+  rgndThresh = rgndThresh || 0
+  gbndThresh = gbndThresh || 0.03 // if the green-blue ratio is above this threshold, mask it
+  b3Thresh = b3Thresh || 5000 // for the 
+  aerosolThresh = aerosolThresh || 200
+  swirThresh = swirThresh || 400
+  cloudProbThresh = cloudProbThresh || 10
+
+  image = ee.Image(image)
+  
+  var snowMask = image.select('NDSI').gt(ndsiThresh)
+  var saturationMask = image.select('^B.*').lt(saturationThresh).reduce(ee.Reducer.min())
+  var redMask = image.select('RGND').gt(rgndThresh)
+  var rockfallMask = image.select('GBND').lt(gbndThresh)
+  var iceMask = image.select('B3').gt(b3Thresh)
+  var aerosolMask = image.select('AOT').lt(aerosolThresh)
+  var swirMask = image.select('B11').lt(swirThresh)
+  var cloudMask = image.select('MSK_CLDPRB').lt(cloudProbThresh)
+  var cloudMask2 = image.select('QA60').eq(0)
+  
+  return snowMask 
+    .and(saturationMask)
+    .and(redMask)
+    .and(rockfallMask)
+    .and(iceMask)
+    .and(aerosolMask)
+    // // .and(swirMask) // at weart, all snow algae had swit>thresh.
+    .and(cloudMask)
+    .and(cloudMask2)
+    .rename('REDMASK')
+}
+// var testImage = filterS2ForAlgae({roi:geometry, startMonth:8, startYear:2020}).first()
+// var plusBands = normalizeBands(testImage)
+// Map.addLayer(plusBands, rgbVisParam, "rgb")
+// Map.addLayer(redSnowMask(plusBands), {}, "mask")
+
+var redSnowToaMask = function(image, ndsiThresh, saturationThresh, rgndThresh, 
+                                  gbndThresh, b3Thresh, aerosolThresh, swirThresh, 
+                                  cloudProbThresh){
+  ndsiThresh = ndsiThresh || 0.65
+  saturationThresh = saturationThresh || 11000
+  rgndThresh = rgndThresh || 0
+  gbndThresh = gbndThresh || 0.03 // if the green-blue ratio is above this threshold, mask it
+  b3Thresh = b3Thresh || 5000 // for the 
+  aerosolThresh = aerosolThresh || 200
+  swirThresh = swirThresh || 400
+  cloudProbThresh = cloudProbThresh || 10
+
+  image = ee.Image(image)
+  
+  var snowMask = image.select('NDSI').gt(ndsiThresh)
+  var saturationMask = image.select('^B.*').lt(saturationThresh).reduce(ee.Reducer.min())
+  var redMask = image.select('RGND').gt(rgndThresh)
+  var rockfallMask = image.select('GBND').lt(gbndThresh)
+  var iceMask = image.select('B3').gt(b3Thresh)
+  var aerosolMask = image.select('AOT').lt(aerosolThresh)
+  var swirMask = image.select('B11').lt(swirThresh)
+  var cloudMask = image.select('MSK_CLDPRB').lt(cloudProbThresh)
+  var cloudMask2 = image.select('QA60').eq(0)
+  
+  return snowMask 
+    .and(saturationMask)
+    .and(redMask)
+    .and(rockfallMask)
+    .and(iceMask)
+    // .and(aerosolMask)
+    // // .and(swirMask) // at weart, all snow algae had swit>thresh.
+    // .and(cloudMask)
+    .and(cloudMask2)
+    .rename('REDMASK')
+}
+
+exports.redSnowToaMask = redSnowToaMask
+/*to do: replace greenMask with an acceptable NDSI threshold...*/
+var computeNDs = function(image, g, r, nir, swir, greenthresh){
+  var rgnd0 = image.normalizedDifference([r, g]).max(0).rename('RGND0')// set negative RGND to 0
+  var greenMask = image.select(g).gt(greenthresh).rename('GREENMASK')
+  var ndsi = image.normalizedDifference([g, swir]).rename('NDSI')// set negative RGND to 0
+
+  var rgnd0Masked = rgnd0
+    .multiply(greenMask)
+    .rename('RGND0_MSKD')
+    
+  return image
+    .addBands(greenMask)
+    .addBands(rgnd0Masked)
+    .addBands(rgnd0)
+    .addBands(ndsi)
+}
+
+var maskL8 = function(image) {
+  // Bits 3 and 4 are cloud shadow and cloud, respectively.
+  var cloudShadowBitMask = (1 << 3);
+  var cloudsBitMask = (1 << 4);
+  // Get the pixel QA band.
+  var qa = image.select('QA_PIXEL');
+  // Both flags should be set to zero, indicating clear conditions.
+  return qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+    .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+}
+
+
+var bitwiseExtract = function(value, fromBit, toBit) {
+  if (toBit === undefined) toBit = fromBit
+  var maskSize = ee.Number(1).add(toBit).subtract(fromBit)
+  var mask = ee.Number(1).leftShift(maskSize).subtract(1)
+  return value.rightShift(fromBit).bitwiseAnd(mask)
+}
+exports.bitwiseExtract=bitwiseExtract
+
+var modisQCMask = function(image){
+  var qa = image.select('state_1km')
+  var cloudState = bitwiseExtract(qa, 0, 1).rename('cloudState')
+  var cloudShadowState = bitwiseExtract(qa, 2,2).rename('cloudShadowState')
+  var aerosolState = bitwiseExtract(qa, 6, 7).rename('aerosolState')
+  var cirrusState = bitwiseExtract(qa, 8, 9).rename('cirrusState')
+  var snowState = bitwiseExtract(qa, 15, 15).rename('snowState')
+  var qaMask = cloudState.eq(0) // not cloudy
+    .and(cloudShadowState.eq(0)) // not cloud shadow
+    .and(aerosolState.neq(3)) // not high aerosol
+    .and(cirrusState.neq(3)) // not high cirrus
+
+  var qc = image.select('QC_500m')
+  var qcState1 = bitwiseExtract(qc, 2, 5).rename('b1QC')   // b1
+  var qcState2 = bitwiseExtract(qc, 6, 9).rename('b2QC')   // b2
+  var qcState3 = bitwiseExtract(qc, 10, 13).rename('b3QC') // b3
+  var qcState4 = bitwiseExtract(qc, 14, 17).rename('b4QC') // b4
+  var qcMask = qcState1.eq(0) // b1 ideal quality
+    .and(qcState2.eq(0))      // b2 ideal quality
+    .and(qcState3.eq(0))      // b3 " "
+    .and(qcState4.eq(0))      // b4 ideal quality
+  
+
+  return qaMask.and(qcMask)
+}
+
+// includes the ice mask
+function processTerraDay(image){
+      // 1 km QA mask
+      var qa = image.select('state_1km')
+      var cloudState = bitwiseExtract(qa, 0, 1).rename('cloudState')
+      var cloudShadowState = bitwiseExtract(qa, 2,2).rename('cloudShadowState')
+      var aerosolState = bitwiseExtract(qa, 6, 7).rename('aerosolState')
+      var cirrusState = bitwiseExtract(qa, 8, 9).rename('cirrusState')
+      var snowState = bitwiseExtract(qa, 15).rename('snowState')
+      var qaMask = //cloudState.eq(0) // not cloudy // often masks snow algae even on clear days :()
+        cloudShadowState.eq(0) // not cloud shadow
+        .and(aerosolState.neq(3)) // not high aerosol
+        .and(cirrusState.neq(3)) // not high cirrus
+        // .and(snowState.eq(1)) // marked as snow
+      
+      var nObsMask = image.select('num_observations_500m').gte(2) // 2 or more obs
+        
+      // 500 m QC Mask
+      var qc = image.select('QC_500m')
+      var qcState1 = bitwiseExtract(qc, 2, 5).rename('b1QC')   // b1
+      var qcState2 = bitwiseExtract(qc, 6, 9).rename('b2QC')   // b2
+      var qcState3 = bitwiseExtract(qc, 10, 13).rename('b3QC') // b3
+      var qcState4 = bitwiseExtract(qc, 14, 17).rename('b4QC') // b4
+      var qcMask = qcState1.eq(0) // b1 ideal quality
+        .and(qcState2.eq(0))      // b2 ideal quality
+        .and(qcState3.eq(0))      // b3 " "
+        .and(qcState4.eq(0))      // b4 ideal quality
+      
+
+      image = computeNDs(image,'sur_refl_b04', 'sur_refl_b01', 'sur_refl_b02', 'sur_refl_b06', 4000)
+      // RGND0_MSKD
+      
+      return image
+        // .updateMask(glacierMask)
+        // .updateMask(ndsiMask)
+        .updateMask(qaMask) 
+        // .updateMask(nObsMask)
+        // .updateMask(qcMask)
+        // .addBands(rgnd0)
+        // .addBands(gbnd)
+        // .addBands(ndsi)
+        // .addBands(cloudState)
+        // .addBands(cloudShadowState)
+        // .addBands(cirrusState)
+        // .addBands(aerosolState)
+}
+exports.processTerraDay=processTerraDay
+var maskModis8 = function(image){
+  var stateQA = image.select('StateQA')
+  var cloudState = bitwiseExtract(stateQA, 0, 1).rename('cloudState')
+  var cloudShadowState = bitwiseExtract(stateQA, 2,2).rename('cloudShadowState')
+  var aerosolState = bitwiseExtract(stateQA, 6, 7).rename('aerosolState')
+  var cirrusState = bitwiseExtract(stateQA, 8, 9).rename('cirrusState')
+  // var snowState = bitwiseExtract(stateQA, 15, 15).rename('snowState')
+  var stateQAMask = cloudState.eq(0) // not cloudy
+    .and(cloudShadowState.eq(0)) // not cloud shadow
+    .and(aerosolState.neq(3)) // not high aerosol
+    .and(cirrusState.neq(3)) // not high cirrus
+
+  var qa = image.select('QA')
+  var qaState = bitwiseExtract(qa, 0, 1)
+  var qaMask = qaState.eq(0) // ideal quality
+
+  return qaMask.and(stateQAMask)
+}
+// classification wrapper 
+
+// export the default parameter settings seperately, for annotating metadata
+var nTreeDefault = 1000
+var mtryDefault = 2
+var minnDefault = 3
+var seedDefault = 0
+exports.nTreeDefault = nTreeDefault
+exports.mtryDefault = mtryDefault
+exports.minnDefault = minnDefault
+exports.seedDefault = seedDefault
+
+var trainClassifier = function(trainDat,nTree,mtry,minn,seed,bands){
+  trainDat = trainDat || train
+  nTree = nTree || nTreeDefault
+  mtry = mtry || mtryDefault
+  minn = minn || minnDefault
+  seed = seed || seedDefault
+  bands = bands || ee.Feature(trainDat.first()).select(['[^CLASS|sys].*']).propertyNames()// default to use all bands for predictors
+  // ["ND2_1","ND2_11","ND2_12","ND5_2","ND6_2",
+  //                   "ND5_3","ND4_2","ND2_8A","ND2_9","ND5_6",
+  //                   "ND4_8","ND2_7","ND5_4","ND6_3","ND2_8",
+  //                   "ND4_6", "RGND", "GBND", "NDSI"]
+
+  var classifier = ee.Classifier.smileRandomForest({
+      numberOfTrees: nTree, 
+      variablesPerSplit: mtry,
+      minLeafPopulation: minn, 
+      seed: seed
+  }).setOutputMode('PROBABILITY')
+  
+  return classifier.train(trainDat, 'CLASS', bands); // return probability
+}
+// print(trainClassifier())
+// print(trainClassifier().explain()) //  get variable importance
+// var trainedClassifier = trainClassifier()
+// var decisionTrees = ee.List(trainedClassifier.explain().get('trees'))
+// Export.table.toAsset({
+//   collection: encodeFeatureCollection(decisionTrees),
+//   description: 'decision-trees-new',
+//   assetId: 'globalSnowAlgae/2_trainDat/decision_trees-new'
+// })
+
+
+
+
+// adds probabililty, class, amd algae (boolean) layers to image
+var classifyAlgae = function(image, classifier, pThresh){
+  pThresh = pThresh || 0.5
+    
+  var probability = image.classify(classifier, 'CLASS_PROB').rename('CLASS_PROB')
+  var classification = probability.gt(pThresh).rename('CLASSIFICATION')
+  var algae = classification.selfMask().rename('ALGAE')
+  
+  return image
+    .addBands(probability)
+    .addBands(classification)
+    .addBands(algae)
+}
+
+var despeckle = function(image, minArea){
+  minArea = minArea || 30*30*10 // at least 10 connected pixels (diagonals ok)
+  
+  // get connected pixel count for each pixel
+  var objectSize = image.connectedPixelCount({
+    maxSize: 256//, eightConnected: true
+  })
+  
+  var pixelArea = ee.Image.pixelArea();
+  
+  // Multiply pixel area by the number of pixels in an object to calculate
+  // the object area. The result is an image where each pixel
+  // of an object relates the area of the object in m^2.
+  var objectArea = objectSize.multiply(pixelArea);
+  
+  // Threshold the `objectArea` image to define a mask that will mask out
+  // objects below a given size.
+  var areaMask = objectArea.gte(minArea);
+  
+  return image.updateMask(areaMask)
+}
+
+
+var objectArea = function(image, minArea){
+  minArea = minArea || 30*30*10 // at least 10 connected pixels (diagonals ok)
+  
+  // get connected pixel count for each pixel
+  var objectSize = image.connectedPixelCount({
+    maxSize: 128, eightConnected: true
+  })
+  
+  var pixelArea = ee.Image.pixelArea();
+  
+  // Multiply pixel area by the number of pixels in an object to calculate
+  // the object area. The result is an image where each pixel
+  // of an object relates the area of the object in m^2.
+  var objectArea = objectSize.multiply(pixelArea);
+  
+  // return an image where each pixel is the area of the object
+  return objectArea;
+}
+exports.objectArea=objectArea
+
+
+var areaImage = function(image, name){
+  return ee.Image(image).multiply(ee.Image.pixelArea()).rename(name);
+}
+exports.areaImage = areaImage
+
+// generates a checker mask for a given projection
+var checkerMask = function(proj, minDist, seed){
+  var proj = ee.Projection(proj).atScale(minDist)
+  var cells = ee.Image(1).reproject(proj)
+  // Map.addLayer(cells.randomVisualizer())
+  var mask = ee.Image.pixelCoordinates(proj)
+      .expression("!((b('x') + 0.5) % 2 != 0 || (b('y') + 0.5) % 2 != 0)")
+  return cells.updateMask(mask).reproject(proj)
+}
+// var sc = checkerMask(proj, minDist, seed)
+// Map.addLayer(sc.randomVisualizer())
+
+// Generate random points in the given region, buffered by the scale of the given projection.
+// leaving geom null defaults to image footprint
+var randomPtsImage = function(prj, minDist, myMask, seed, geom, show, limit){
+  // var prj = args.prj || ee.Projection('ESPG:3005')
+  // var coarseScale = args.coarseScale || 1000 // the scale of the coarse grid
+  // var fineScale = args.fineScale || 1/16 
+  // var mask = args.mask || ee.Image()
+  // var seed = args.seed || 0
+  // var geom = args.geom || mask.get("system:footprint")
+  // var show = args.show //|| false
+  //print(show)
+  // weird, the || syntax seems to work for the other args, but not this boolean 
+  // if (show === undefined || show === null){show = false}
+  
+  var fineScale = 1/32
+  
+  // Generate a random image of integers in specified projection at specified cell size.
+  // Masking in a checkerboard pattern to enforce minimum distance (minDist)
+  var proj = ee.Projection(prj).atScale(minDist)
+  var cells = ee.Image(1).reproject(proj)
+  var bufferMask = ee.Image.pixelCoordinates(proj)
+      .expression("!((b('x') + 0.5) % 2 != 0 || (b('y') + 0.5) % 2 != 0)")
+  cells = cells.updateMask(bufferMask).reproject(proj)
+  if(show){ Map.addLayer(cells,{},"TEST coarse grid") }
+  
+  // Generate another random image and select the maximum random value 
+  // in each grid cell as the sample point.
+  var random = ee.Image.random(seed).multiply(1000000).int()
+  var maximum = cells.addBands(random).reduceConnectedComponents(ee.Reducer.max())
+    
+  // Find all the points that are local maximums.
+  var points = random.eq(maximum).selfMask()
+  points = points.reproject(proj.scale(fineScale, fineScale))
+  if(show){ Map.addLayer(points, {palette: "white"},"TEST fine grid")}
+  
+  // // Mask points
+  // var maskedPts = points.updateMask(myMask)
+  // if(show){Map.addLayer(maskedPts, {palette:"green"},"TEST masked fine grid")}
+  
+  // convert points to vectors
+  var samples = points//maskedPts
+    .reduceToVectors({
+      reducer: ee.Reducer.countEvery(), 
+      scale:1,
+      geometry: geom,
+      geometryType: "centroid", 
+      maxPixels: 1e12
+    })
+    .randomColumn('random',seed) // shuffle the order-- is this necessary?
+    .sort('random')
+  if(show){Map.addLayer(samples,{},"TEST vector points")}
+  
+  return samples.limit(limit)
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+//https://gis.stackexchange.com/questions/432355/how-to-save-random-forest-classifier-within-gee-that-can-be-called-later-for-cla
+function encodeFeatureCollection(value) {
+  var string = ee.String.encodeJSON(value)
+  var stringLength = string.length()
+  var maxLength = 1000000// added a zero here
+  var maxProperties = 1000
+  var values = ee.List.sequence(0, stringLength, maxLength)
+    .map(function (start) {
+      start = ee.Number(start)
+      var end = start.add(maxLength).min(stringLength)
+      return string.slice(start, end)
+    })
+    .filter(ee.Filter.neq('item', ''))
+  var numberOfProperties = values.size()
+  return ee.FeatureCollection(ee.List.sequence(0, values.size(), maxProperties)
+    .map(function (start) {
+      start = ee.Number(start)
+      var end = start.add(maxProperties).min(numberOfProperties)
+      var propertyValues = values.slice(start, end)
+      var propertyKeys = ee.List.sequence(1, propertyValues.size())
+        .map(function (i) {
+          return ee.Number(i).format('%d')
+        })
+      var properties = ee.Dictionary.fromLists(propertyKeys, propertyValues)
+      return ee.Feature(ee.Geometry.Point([0, 0]), properties)
+    }).filter(ee.Filter.notNull(['1']))
+  )
+}
+
+
+function decodeFeatureCollection(featureCollection) {
+  return featureCollection
+    .map(function (feature) {
+      var dict = feature.toDictionary()
+      var keys = dict.keys()
+        .map(function (key) {
+          return ee.Number.parse(ee.String(key))
+        })
+      var value = dict.values().sort(keys).join()
+      return ee.Feature(null, {value: value})
+    })
+    .aggregate_array('value')
+    .join()
+    .decodeJSON()
+}
+
+
+function filterDistance(points, distance) {
+  var filt2 = ee.List([])
+  var filt = points.iterate(function(el, ini){
+                        ini = ee.List(ini)
+                        var fcini = ee.FeatureCollection(ini)
+                        var buf = ee.Feature(el).geometry(10).buffer(distance, 10)
+                        var s = fcini.filterBounds(buf).size()
+                        var cond = s.lte(0)
+                        return ee.Algorithms.If(cond, ini.add(el), ini)
+                      }, filt2)
+  var filtered = ee.FeatureCollection(ee.List(filt))
+  return filtered
+}
+
+function randomString(length) {
+    var result           = '';
+    var characters       = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    var charactersLength = characters.length;
+    for ( var i = 0; i < length; i++ ) {
+        result += characters.charAt(Math.floor(Math.random() * charactersLength));
+    }
+    return result;
+}
+
+// preferentially mask high and low values
+function maskExtremeVals(args){
+  var i = args.image
+  var minVal = args.minVal || 0 // the minimum value in the image
+  var maxVal = args.maxVal || 1 // the max value in the image
+  // these parameters control the width of the normal curve. 
+  // for both, lower arg values -> narrower normal curve (more aggressive masking)
+  var scaleThresh = args.scaleThresh || 0.15;
+  var maskThresh = args.maskThresh || 0.15;
+  var printHist = args.printHist || false
+  
+  
+  var prj = i.projection().wkt()
+  
+  
+  // compute the distance from 0 or 1
+  var scaled = i.unitScale(minVal, maxVal) // scale image between 0 and 1
+  var dist = scaled.subtract(0.5).abs();
+  
+  // nudge the distance by a random amount
+  var norm = ee.Image.random(1234, 'normal').subtract(0.5).multiply(scaleThresh).reproject(prj);
+  var dist_adj = dist.add(norm);
+  
+  // mask the image by the adjusted distance
+  var mask = dist_adj.lt(maskThresh);
+  var masked = i.updateMask(mask);
+  
+  if(printHist){
+    var footprint = ee.Geometry(i.get('system:footprint'))
+    print(ui.Chart.image.histogram(masked, footprint))
+  }
+  
+  return masked;
+}
+function printHist(i, geom){
+  geom = geom || i.geometry()
+  print(ui.Chart.image.histogram({
+    image:i, 
+    region: geom,
+    maxPixels: 1e13
+  }) );
+}
+
+var sumWrap = function(col){return col.sum()} 
+var meanWrap = function(col){return col.mean()} 
+var maxWrap = function(col){return col.max()} 
+exports.sumWrap = sumWrap
+exports.meanWrap = meanWrap
+exports.maxWrap = maxWrap
+
+function timeSummarise(col, reducer, newNames, groupBy, startGroup, endGroup){
+  newNames = newNames || col.first().bandNames()
+  groupBy = groupBy || 'year'
+  startGroup = startGroup || 2000
+  endGroup = endGroup || 2022
+  
+  var groups = ee.List.sequence(startGroup, endGroup)
+  
+  return ee.ImageCollection.fromImages(
+    groups.map(function (i) {
+      var reduced = reducer( col.filter(ee.Filter.calendarRange(i, i, groupBy)) )
+      return reduced
+        .set(groupBy, i)
+        .rename(newNames)
+  }))
+}
+exports.timeSummarise = timeSummarise
+
+ var polar_proj = ee.Projection('PROJCS["ProjWiz_Custom_Azimuthal_Equidistant",\
+ GEOGCS["GCS_WGS_1984",\
+  DATUM["D_WGS_1984",\
+   SPHEROID["WGS_1984",6378137.0,298.257223563]],\
+  PRIMEM["Greenwich",0.0],\
+  UNIT["Degree",0.0174532925199433]],\
+ PROJECTION["Azimuthal_Equidistant"],\
+ PARAMETER["False_Easting",0.0],\
+ PARAMETER["False_Northing",0.0],\
+ PARAMETER["Central_Meridian",0],\
+ PARAMETER["Latitude_Of_Origin",90],\
+ UNIT["Meter",1.0]]')
+exports.polar_proj=polar_proj 
+
+function makeAeaProj(center, parallels){
+  var string = 
+  'PROJCS["North_America_Albers_Equal_Area_Conic",\
+    GEOGCS["NAD83",\
+        DATUM["North_American_Datum_1983",\
+            SPHEROID["GRS 1980",6378137,298.257222101,\
+                AUTHORITY["EPSG","7019"]],\
+            AUTHORITY["EPSG","6269"]],\
+        PRIMEM["Greenwich",0,\
+            AUTHORITY["EPSG","8901"]],\
+        UNIT["degree",0.0174532925199433,\
+            AUTHORITY["EPSG","9122"]],\
+        AUTHORITY["EPSG","4269"]],\
+    PROJECTION["Albers_Conic_Equal_Area"],\
+    PARAMETER["latitude_of_center",'
+  .concat(center[1])
+  .concat('],PARAMETER["longitude_of_center",')
+  .concat(center[0])
+  .concat('],PARAMETER["standard_parallel_1",')
+  .concat(parallels[0])
+  .concat('],PARAMETER["standard_parallel_2",')
+  .concat(parallels[1])
+  .concat('],PARAMETER["false_easting",0],\
+    PARAMETER["false_northing",0],\
+    UNIT["metre",1,\
+        AUTHORITY["EPSG","9001"]],\
+    AXIS["Easting",EAST],\
+    AXIS["Northing",NORTH],\
+    AUTHORITY["ESRI","102008"]]')
+    
+  return ee.Projection(String(string))
+}
+exports.makeAeaProj = makeAeaProj
+
+
+var proj_moll = ee.Projection(' \
+  PROJCS["World_Mollweide", \
+    GEOGCS["GCS_WGS_1984", \
+      DATUM["WGS_1984", \
+        SPHEROID["WGS_1984",6378137,298.257223563]], \
+      PRIMEM["Greenwich",0], \
+      UNIT["Degree",0.017453292519943295]], \
+    PROJECTION["Mollweide"], \
+    PARAMETER["False_Easting",0], \
+    PARAMETER["False_Northing",0], \
+    PARAMETER["Central_Meridian",0], \
+    UNIT["Meter",1], \
+    AUTHORITY["EPSG","54009"]]');
+    
+exports.proj_moll = proj_moll
+
+// var proj_ee = ee.Projection('\
+//   PROJCS["ProjWiz_Custom_Equal_Earth",\
+// GEOGCS["GCS_WGS_1984",\
+//   DATUM["D_WGS_1984",\
+//   SPHEROID["WGS_1984",6378137.0,298.257223563]],\
+//   PRIMEM["Greenwich",0.0],\
+//   UNIT["Degree",0.0174532925199433]],\
+// PROJECTION["Equal_Earth"],\
+// PARAMETER["False_Easting",0.0],\
+// PARAMETER["False_Northing",0.0],\
+// PARAMETER["Central_Meridian",0],\
+// UNIT["Meter",1.0]]\
+// ')
+// exports.proj_ee = proj_ee
+
+// Wagner IV projection "+proj=wag4 +lon_0=0 +datum=WGS84 +units=m +no_defs"
+// source: https://projectionwizard.org/#
+var proj_wag4 = ee.Projection('\
+PROJCS["ProjWiz_Custom_Wagner_IV",\
+ GEOGCS["GCS_WGS_1984",\
+  DATUM["D_WGS_1984",\
+   SPHEROID["WGS_1984",6378137.0,298.257223563]],\
+  PRIMEM["Greenwich",0.0],\
+  UNIT["Degree",0.0174532925199433]],\
+ PROJECTION["Wagner_IV"],\
+ PARAMETER["False_Easting",0.0],\
+ PARAMETER["False_Northing",0.0],\
+ PARAMETER["Central_Meridian",0],\
+ UNIT["Meter",1.0]]\
+')
+exports.proj_wag4 = proj_wag4
+
+// // Wagner VII proj "+proj=wag7 +lon_0=0 +datum=WGS84 +units=m +no_defs"
+// var proj_wag7 = ee.Projection('\
+// PROJCS["ProjWiz_Custom_Wagner_VII",\
+// GEOGCS["GCS_WGS_1984",\
+//   DATUM["D_WGS_1984",\
+//   SPHEROID["WGS_1984",6378137.0,298.257223563]],\
+//   PRIMEM["Greenwich",0.0],\
+//   UNIT["Degree",0.0174532925199433]],\
+// PROJECTION["Wagner_VII"],\
+// PARAMETER["False_Easting",0.0],\
+// PARAMETER["False_Northing",0.0],\
+// PARAMETER["Central_Meridian",0],\
+// UNIT["Meter",1.0]]\
+// ')
+// exports.proj_wag7 = proj_wag7
+
+var myMeanReducer = ee.Reducer.mean().combine({
+  reducer2: ee.Reducer.count().combine({
+    reducer2: ee.Reducer.stdDev(),
+    sharedInputs: true}),
+  sharedInputs: true})
+
+var mySumReducer = ee.Reducer.sum().combine({
+  reducer2: ee.Reducer.count(),
+  sharedInputs: true
+})
+
+var myCombinedReducer = ee.Reducer.mean().combine({
+  reducer2: ee.Reducer.count().combine({
+    reducer2: ee.Reducer.stdDev().combine({
+      reducer2: ee.Reducer.sum(),
+      sharedInputs: true}).combine({
+        reducer2: ee.Reducer.median(),
+        sharedInputs: true}),
+    sharedInputs: true}),
+  sharedInputs: true})
+exports.myMeanReducer = myMeanReducer
+exports.mySumReducer = mySumReducer
+exports.myCombinedReducer = myCombinedReducer
+
+// excluding cloud masking, since this is often wacky over red snow
+// to do: include option yes or no cloud mask 
+var processTerraDayNoCloud = function(image){
+      // 1 km QA mask
+      var qa = image.select('state_1km')
+      var cloudState = bitwiseExtract(qa, 0, 1).rename('cloudState')
+      var cloudShadowState = bitwiseExtract(qa, 2,2).rename('cloudShadowState')
+      var aerosolState = bitwiseExtract(qa, 6, 7).rename('aerosolState')
+      var cirrusState = bitwiseExtract(qa, 8, 9).rename('cirrusState')
+      var snowState = bitwiseExtract(qa, 15).rename('snowState')
+      var qaMask = cloudState.eq(0) // not cloudy
+        .and(cloudShadowState.eq(0)) // not cloud shadow
+        .and(aerosolState.neq(3)) // not high aerosol
+        .and(cirrusState.neq(3)) // not high cirrus
+        // .and(snowState.eq(1)) // marked as snow
+      
+      var nObsMask = image.select('num_observations_500m').gte(2) // 2 or more obs
+        
+      // 500 m QC Mask
+      var qc = image.select('QC_500m')
+      var qcState1 = bitwiseExtract(qc, 2, 5).rename('b1QC')   // b1
+      var qcState2 = bitwiseExtract(qc, 6, 9).rename('b2QC')   // b2
+      var qcState3 = bitwiseExtract(qc, 10, 13).rename('b3QC') // b3
+      var qcState4 = bitwiseExtract(qc, 14, 17).rename('b4QC') // b4
+      var qcMask = qcState1.eq(0) // b1 ideal quality
+        .and(qcState2.eq(0))      // b2 ideal quality
+        .and(qcState3.eq(0))      // b3 " "
+        .and(qcState4.eq(0))      // b4 ideal quality
+      
+      var ndsi = image
+        .normalizedDifference(['sur_refl_b04', 'sur_refl_b06'])
+        .rename('NDSI')
+      var ndsiMask = ndsi.gt(0.4)
+      
+      var rgnd = image
+        .normalizedDifference(['sur_refl_b01','sur_refl_b04']) 
+        .rename('RGND')
+      
+      var rgndMask = rgnd.gt(0)
+      var rgnd0 = rgnd.multiply(rgndMask).rename('RGND0') // set negative pixels to zero (dosent make sense to have negative snow algae)
+        
+      var gbnd = image
+        .normalizedDifference(['sur_refl_b04', 'sur_refl_b03'])
+        .rename('GBND')
+      // var gbndMask = gbnd.gt()
+      
+      // var isSnow = image.select('sur_refl_b04').gt(greenthresh)
+      
+      return image
+        .updateMask(ndsiMask)
+        .updateMask(qaMask) // snow algae is often masked by QA, even on clear days!-- which bit is the problem>?? i think cloudmask
+        // .updateMask(nObsMask)
+        .updateMask(qcMask)
+        .addBands(rgnd0)
+        .addBands(gbnd)
+        .addBands(ndsi)
+  }
+exports.processTerraDayNoCloud = processTerraDayNoCloud
+
+exports.printHist = printHist
+exports.modisQCMask = modisQCMask
+exports.maskL8 = maskL8
+exports.computeNDs = computeNDs
+exports.filterS2ForAlgae = filterS2ForAlgae
+exports.addNormalizedBands = addNormalizedBands
+exports.redSnowMask = redSnowMask
+exports.trainClassifier = trainClassifier
+exports.classifyAlgae = classifyAlgae
+exports.despeckle = despeckle
+exports.checkerMask = checkerMask
+exports.randomPtsImage = randomPtsImage 
+exports.encodeFeatureCollection = encodeFeatureCollection
+exports.decodeFeatureCollection = decodeFeatureCollection
+exports.randomString = randomString
+exports.filterDistance = filterDistance
+exports.maskExtremeVals = maskExtremeVals
+
+exports.rgbVisParam = rgbVisParam
+exports.rgndVisParam = rgndVisParam
+exports.classProbVisParam = classProbVisParam
+exports.classVisParam = classVisParam
+exports.modisRgbVisParam = modisRgbVisParam
+exports.maskModis8=maskModis8

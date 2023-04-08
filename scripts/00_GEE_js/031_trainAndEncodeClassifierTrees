@@ -1,0 +1,33 @@
+// todo try w 1000 trees
+
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions')
+var bn = "trainclean2"
+var trainingData = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/2_trainDat/" + bn);
+
+var classifier = ee.Classifier.smileRandomForest({
+    numberOfTrees: 500, 
+    variablesPerSplit: 3, // mtry
+    minLeafPopulation: 2, // min n
+    seed: 123
+})//.setOutputMode('PROBABILITY')//don't think this is doing anything here, since we are not applying our classifier to anything here
+
+var my_bands = ["ND2_1","ND5_2","ND5_3","ND6_2","ND4_2","ND2_8A","ND2_9",
+"ND5_6","ND4_8","ND2_7","ND5_4","ND6_3","ND2_8","ND4_6","ND2_11","ND2_12",
+"GBND","NDSI","RGND",
+"B1","B2","B3","B4","B5","B6","B7","B8","B8A","B9","B11","B12"]
+
+var trainedClassifier = classifier.train(trainingData, 'CLASS', my_bands); // return probability
+print(trainedClassifier, "trained classifier")
+
+var decisionTrees = ee.List(trainedClassifier.explain().get('trees'))
+// print(decisionTrees)
+Export.table.toAsset({
+  collection: myFunctions.encodeFeatureCollection(decisionTrees),
+  description: bn + "_trees",
+  assetId: 'globalSnowAlgae/2_trainDat/' + bn + '_trees'
+})
+
+
+
+// precision and recall metrics ------------------
+//OOB

@@ -1,0 +1,366 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var daymet = ee.ImageCollection("NASA/ORNL/DAYMET_V4"),
+    s2sr = ee.ImageCollection("COPERNICUS/S2_SR"),
+    dem = ee.Image("MERIT/DEM/v1_0_3"),
+    glims = ee.FeatureCollection("GLIMS/current"),
+    gidList = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/gids_north_america_gt10"),
+    geometry = 
+    /* color: #d63000 */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-116.80901868630937, 50.75214286931022],
+          [-116.80901868630937, 50.748993186561634],
+          [-116.80043561746172, 50.748993186561634],
+          [-116.80043561746172, 50.75214286931022]]], null, false),
+    algaeMap = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/aaatrainclean2T"),
+    glacierImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages/glaciers"),
+    glacierList = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/gids_north_america_gt10"),
+    regions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/glacierRegionsV16"),
+    forestPath = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/2_trainDat/trainclean2_trees");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+insol data 2 m
+rgnd region time series 12 min
+rgnd glacier ts: 3min for 1000 glaciers
+*/
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions')
+var palettes = require('users/gena/packages:palettes');
+
+regions = regions
+  .filter(ee.Filter.eq('subregionOf','northAmerica'))
+  .filter(ee.Filter.neq('name','alaskaPeninsula'))
+  .filter(ee.Filter.neq('name','brooks'))
+  .filter(ee.Filter.neq('name','cascades'))
+  
+var algaeMask = algaeMap.select('CLASS_PROB').mosaic().gt(0.2).unmask(0, false)
+var glacierImage = glacierImages
+  .map(function(i){ // hack to deal with incompatible band names (to do correct in original dataset)
+    return ee.Image(i.rename('glacier')) 
+  }).mosaic()
+var glacierMask = glacierImage.unmask(0,false)
+// Map.addLayer(glacierMask, {min:0, max:1, palette:['black','white']}, 'glacier mask')
+
+var startYear = 2019 // 
+var endYear = 2022 // daymet data not avail for 2022
+
+
+// apply classifier to filtered image collection ---------------------------
+
+var dayInc = 5
+var startMonth = 6 // potentially putting a zero far before the actual start date 
+var endMonth = 9
+var maxCC = 40 // max allowable cloud cover per image
+var maxSza = 65
+var thresh = 0.2
+// print('start and end year', startYear, endYear)
+// print('start and end month', startMonth, endMonth)
+
+// load precomputed decision trees
+		
+var decisionTrees = myFunctions.decodeFeatureCollection(forestPath)	
+var trainedClassifier = ee.Classifier.decisionTreeEnsemble(decisionTrees).setOutputMode('raw')				
+
+var myS2 = s2sr
+  .filterBounds(regions.geometry()) 
+  .filter(ee.Filter.calendarRange(startYear, endYear, 'year'))
+  .filter(ee.Filter.calendarRange(startMonth, endMonth, 'month'))
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', maxCC)) // remove high cloud % images
+  .filter(ee.Filter.gt('SNOW_ICE_PERCENTAGE', 0.5)) // remove images lacking snow
+  .filter(ee.Filter.lt('MEAN_SOLAR_ZENITH_ANGLE', maxSza))
+
+// make 5-day mosaics (flyover frequency of Sentinel-2)
+var millisInDay = 1000*60*60*24
+var millisInWeek = millisInDay*dayInc
+var milliList = ee.List.sequence(
+  ee.Date(startYear + '-0' + startMonth + '-01').millis(), // exact start and end date arbitrary
+  ee.Date(endYear + '-0' + endMonth + '-30').millis(), 
+  millisInWeek
+)
+
+var weeklyMosaics = ee.ImageCollection.fromImages(
+  milliList.map(function (milli) {
+    var date = ee.Date(milli);
+    var images = myS2
+      .filterDate(date, date.advance(dayInc,'day')) 
+      .sort('CLOUDY_PIXEL_PERCENTAGE'); // clear images on top
+    
+    var dateProperties = {
+        'system:time_start':milli,
+        'date': date.format("YYYY-MM-dd")
+    };
+    var mosaic  = images.mosaic().set(dateProperties)
+    
+    return ee.Algorithms.If(images.size().neq(0), mosaic); // If avoids empty images
+}))
+// print(weeklyMosaics.size(), "n mosaics") 
+
+// returns algal rgnd, where glacier is 0, non glacier is masked, and algae is a value of RGND
+function getAlgalRgnd(image){
+  image = image.updateMask(algaeMask) // search within the precomputed algae mask to reduce computation
+  image = myFunctions.addNormalizedBands(image); // add derived bands for classifier
+  var redMask = myFunctions.redSnowMask(image)
+  var maskedImage = image.updateMask(redMask) // only feed red snow pixels to classifier
+  
+  // classify using precomputed decision trees
+  var classifierRawOutput = maskedImage.classify(trainedClassifier, 'raw');
+  // generate classification mask with probability threshold
+  var probability = classifierRawOutput
+    .arrayReduce(ee.Reducer.mean(), ee.List([0]))
+    .arrayGet(0).rename('CLASS_PROB')
+  var classification = probability.gt(thresh).rename('CLASS')
+  
+  var algalRgnd = maskedImage.select('RGND') 
+    .updateMask(classification) // mask non algal pixels
+  // returns RGND, masked to show only snow algae
+  // this will return low n pix early in season when there is no algae
+  // or mid season if there is clouds
+  // we want to differentiate between true negative data, and where data is lacking (cloudmasked)
+  // using pixel count as a criteria
+  // approach: unmask everything (ie so we are computing algae over the entire glacier area)
+  // then apply a final QC mask for clouds
+    .unmask(0,false) // set all other glacier pixels 0
+    .updateMask(glacierMask) 
+    .rename('ALGAL_RGND') // should be unmasked over all glacier pixels
+  
+  // apply QC mask for clouds etc
+  var aerosolMask = image.select('AOT').lt(200)
+  var cloudMask = image.select('MSK_CLDPRB').lt(10)// vals > 10% will be set to 0
+  var cloudMask2 = image.select('QA60').eq(0)
+  // var scl = image.select('SCL')
+  var algalRgndCloudmasked = algalRgnd.updateMask(cloudMask).updateMask(cloudMask2).updateMask(aerosolMask)
+    
+  return algalRgndCloudmasked
+    .set('system:time_start',image.get('system:time_start'))
+    .set('date',image.get('date'))
+}
+
+var algalRgnd = weeklyMosaics.map(getAlgalRgnd); // within the glacier mask
+// print(algalRgnd.first(),'s2 contains date and system:time_start properties?') // ensure image properties are copied correctly
+// print(algalRgnd.sort('date', false).first())//2022-08-29
+
+
+
+
+
+
+// compute incident solar radiation --------------------------------------------------
+
+
+var daymetSolar = daymet
+  .filter(ee.Filter.calendarRange(startYear, endYear, 'year'))
+  .filter(ee.Filter.calendarRange(startMonth, endMonth, 'month'))
+  .map(function(i){
+    i = i.updateMask(glacierMask)
+    var date = i.date()
+    var millis = ee.Date(date).millis() 
+    var insol = i.select('srad').multiply(i.select('dayl')).rename('INSOL')// srad is averaged per dayl, so (w/m2)*s = j/m2
+    return insol.addBands(i.select('srad'))
+      .set({
+        'date': date.format('YYYY-MM-dd'),
+        'system:time_start': date.millis()
+      })
+  })
+// print(daymetSolar.first(), 'daymet contains date and system:time_start properties?')
+
+
+
+
+// export data per region ---------------------------------
+
+// mean within the glacier mask and algae mask (need both)
+var rgndStats = algalRgnd.map(function(i){
+  var algaeMasked = i.updateMask(algaeMask).rename('ALGAL_RGND_ALGAEMASK')
+  return i.addBands(algaeMasked)
+  .reduceRegions({
+    collection: regions,
+    reducer: myFunctions.myMeanReducer, // mean, sd, and count (the latter for QC to remove cloudy obs)
+    scale: 100,
+    tileScale: 1
+  }).map(function(f){return f.set('date',i.get('date'))})
+}).flatten()
+// print(rgndStats.sort('date', false).first())
+
+Export.table.toDrive({
+  collection: rgndStats,
+  description: "rgndTimeSeriesRegions",
+  folder: "s2_temporal",
+  selectors:['name', 'date','ALGAL_RGND_mean','ALGAL_RGND_stdDev','ALGAL_RGND_count',
+  'ALGAL_RGND_ALGAEMASK_mean','ALGAL_RGND_ALGAEMASK_stdDev','ALGAL_RGND_ALGAEMASK_count']
+})
+
+// within the glacier mask 
+var insolStats = daymetSolar.map(function(i){
+  return i.reduceRegions({
+    collection: regions,
+    reducer: ee.Reducer.mean(), // this should not contain any masked vals
+    scale: 1000
+  }).map(function(f){return f.set('date',i.get('date'))})
+}).flatten()
+// print(insolStats.limit(2), "insol for export")
+
+Export.table.toDrive({
+  collection: insolStats,
+  description: "insolTimeSeriesRegions",
+  folder: "s2_temporal",
+  selectors: ['name', 'date','INSOL','srad'] // include srad for computing radiative forcing
+})
+
+
+// data per grid cell ---------------------------
+
+var smallGridScale = 20
+var bc_albers = myFunctions.makeAeaProj([-135, 57],[49, 63])
+var northAmericaGrid = regions.geometry().coveringGrid(bc_albers, smallGridScale*1000)
+
+
+var rgndStatsGrid = algalRgnd.map(function(i){
+  var algaeMasked = i.updateMask(algaeMask).rename('ALGAL_RGND_ALGAEMASK')
+  return i.addBands(algaeMasked)
+  .reduceRegions({
+    collection: northAmericaGrid,
+    reducer: myFunctions.myMeanReducer, // mean, sd, and count (the latter for QC to remove cloudy obs)
+    scale: 100,
+    tileScale: 1
+  }).map(function(f){return f.set('date',i.get('date'))})
+}).flatten()
+// print(rgndStatsGrid.limit(2))
+
+Export.table.toDrive({
+  collection: rgndStatsGrid,
+  description: "rgndTimeSeriesGrid",
+  folder: "s2_temporal",
+  selectors:['system:index','date','ALGAL_RGND_mean','ALGAL_RGND_stdDev','ALGAL_RGND_count',
+  'ALGAL_RGND_ALGAEMASK_mean','ALGAL_RGND_ALGAEMASK_stdDev','ALGAL_RGND_ALGAEMASK_count'],
+  fileFormat: 'CSV'
+})
+
+var areaImage = ee.Image.pixelArea().divide(1000*1000) // in km2
+
+var algaeArea = algaeMask.selfMask().multiply(areaImage).rename("algae_km2")
+var glacierArea = glacierImage.multiply(areaImage).rename("glacier_km2") 
+
+
+northAmericaGrid = algaeArea.addBands(glacierArea)
+  .reduceRegions({
+    collection: northAmericaGrid,
+    reducer: ee.Reducer.sum(), 
+    scale: 50  
+  }).filter(ee.Filter.gt('glacier_km2',1))
+print(northAmericaGrid.first())
+
+
+Export.table.toDrive({
+  collection: northAmericaGrid,
+  description: "northAmerica20kGrid",
+  folder: "s2_temporal",
+  selectors:['system:index','algae_km2','glacier_km2'],
+  fileFormat: 'KML'
+})
+
+
+var insolStatsGrid = daymetSolar.map(function(i){
+  return i.reduceRegions({
+    collection: northAmericaGrid,
+    reducer: ee.Reducer.mean(), // this should not contain any masked vals
+    scale: 1000
+  }).map(function(f){return f.set('date',i.get('date'))})
+}).flatten()
+// print(insolStats.limit(2), "insol for export")
+
+Export.table.toDrive({
+  collection: insolStatsGrid,
+  description: "insolTimeSeriesGrid",
+  folder: "s2_temporal",
+  selectors: ['system:index', 'date','INSOL','srad']
+})
+
+
+
+// data per watershed ------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// export data per glaciers------------------------------
+
+glacierList = glacierList.filter(ee.Filter.gt('frac',0.2))
+// print(glacierList.size())
+
+var myGlims = glims
+  .filter(ee.Filter.inList('glac_id', glacierList.aggregate_array('glac_id')))
+  .filter(ee.Filter.neq('chief_affl','Manchester Metropolitan University'))
+  .filter(ee.Filter.neq('chief_affl','University of Zurich-Irchel'))
+  .filter(ee.Filter.neq('chief_affl','University of Washington')) // obviously wrong polygons
+  .distinct(['glac_id'])// remove duplicates
+  // filter out duplicate entries missed by the distinct() function
+  .filter(ee.Filter.neq('glac_id','G235219E57822N')) // northern rockies 
+  .filter(ee.Filter.neq('glac_id','G229968E56437N'))
+  .sort('glac_id') // in case of overlap, at least always be consistent
+  .map(function(f){return f.simplify(50)})
+
+// Map.addLayer(myGlims) 
+
+
+var rgndGlacierStats = algalRgnd.map(function(i){
+  var algaeMasked = i.updateMask(algaeMask).rename('ALGAL_RGND_IN_ALGAEMASK')
+  return i.addBands(algaeMasked).reduceRegions({
+    collection: myGlims.select(['glac_id']),
+    reducer: myFunctions.myMeanReducer, // mean, sd, and count (the latter for QC to remove cloudy obs)
+    scale: 100,
+    tileScale: 1
+  }).map(function(f){
+    return f.setGeometry(null).copyProperties(i)
+  })
+}).flatten()
+
+// print(rgndGlacierStats.first())
+Export.table.toDrive({
+  collection: rgndGlacierStats,
+  description: "rgndTimeSeriesGlaciers",
+  folder: "s2_temporal"
+})
+
+var insolGlacierStats = daymetSolar.map(function(i){
+  return i.reduceRegions({
+    collection: myGlims.select(['glac_id']),
+    reducer: ee.Reducer.mean(),
+    scale: 1000
+  }).map(function(f){return f.set('date',i.get('date')).setGeometry(null)})
+}).flatten()
+// print(insolGlacierStats.limit(2))
+
+Export.table.toDrive({
+  collection: insolGlacierStats,
+  description: "insolTimeSeriesGlaciers",
+  folder: "s2_temporal",
+  selectors: ['glac_id', 'date','INSOL','srad'] // include srad for computing radiative forcing
+})
+
+Export.table.toDrive({
+  collection:myGlims,
+  description:'glimsMeta',
+  folder:'sa_biogeography',
+  fileFormat:'KML'
+})
+

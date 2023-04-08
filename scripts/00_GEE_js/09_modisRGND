@@ -1,0 +1,676 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var algaeMap = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/aaatrainclean2T"),
+    regions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/glacierRegionsV16"),
+    terraDay = ee.ImageCollection("MODIS/061/MOD09GA"),
+    terra8 = ee.ImageCollection("MODIS/061/MOD09A1"),
+    aqua8 = ee.ImageCollection("MODIS/061/MYD09A1"),
+    aquaDay = ee.ImageCollection("MODIS/061/MYD09GA"),
+    algaeElevMasks = ee.Image("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/medianElvAlgaeMasks");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/* 
+MODIS RGND trends within the S2 classified algal range 
+
+runtime: 
+8-day RGND time series: 17 min
+daily RGND time series: 
+DOY of max RGND: 3 hr (no runtime difference with CRS)-- but ran in 20  using thresh 0.2! 
+timeseries: <1 min
+mean max terraday100 : ~30min in default CRS
+*/
+
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions')
+var palettes = require('users/gena/packages:palettes');
+
+
+var thresh = 0.2
+var startMonth = 7
+var endMonth = 7
+var terraExportScale = 100
+var maxDoyScale = 100
+var minContigArea = 1*1000*1000 // 2 modis grid cells, 1 km2
+// maxPix 256, if we export at 100m res thats 256*100*100 =2.56 km2, so this computation should succeed
+var myCrs = 'EPSG:4326'//EPSG:3005'
+var rangeList = ['alaskaRange','interiorNorth','interiorSouth','coastNorth','coastSouth']
+regions = regions.filter(ee.Filter.inList('name', rangeList)).aside(Map.addLayer)
+
+
+var algaeMask  = algaeMap.select('CLASS_PROB').mosaic().gt(thresh).selfMask()
+// remove small contiguous algal blooms
+// (modis would be fractionally masked, but might as well remove this as it will just add noise)
+algaeMask = myFunctions.despeckle(algaeMask, minContigArea) // this will slow down runtime considerably
+algaeMask = algaeMask.unmask(0,false)
+
+// var algaeMask = algaeElevMasks.select('LOW_ALGAE').unmask(0,false)
+// print(algaeMask)
+
+// process MODIS images  -----------------------------------
+
+function processTerraDay(image){
+    var date = image.date()
+    // 1 km QA mask
+    var qa = image.select('state_1km')
+    var cloudState = myFunctions.bitwiseExtract(qa, 0, 1).rename('cloudState')
+    var cloudShadowState = myFunctions.bitwiseExtract(qa, 2,2).rename('cloudShadowState')
+    var aerosolState = myFunctions.bitwiseExtract(qa, 6, 7).rename('aerosolState')
+    var cirrusState = myFunctions.bitwiseExtract(qa, 8, 9).rename('cirrusState')
+    var snowState = myFunctions.bitwiseExtract(qa, 15).rename('snowState')
+    var qaMask = //cloudState.eq(0) // not cloudy // often masks snow algae even on clear days :()
+      cloudShadowState.eq(0) // not cloud shadow
+      .and(aerosolState.neq(3)) // not high aerosol
+      .and(cirrusState.neq(3)) // not high cirrus
+      // .and(snowState.eq(1)) // marked as snow
+    
+    var nObsMask = image.select('num_observations_500m').gte(2) // 2 or more obs
+      
+    // 500 m QC Mask
+    var qc = image.select('QC_500m')
+    var qcState1 = myFunctions.bitwiseExtract(qc, 2, 5).rename('b1QC')   // b1
+    var qcState2 = myFunctions.bitwiseExtract(qc, 6, 9).rename('b2QC')   // b2
+    var qcState3 = myFunctions.bitwiseExtract(qc, 10, 13).rename('b3QC') // b3
+    var qcState4 = myFunctions.bitwiseExtract(qc, 14, 17).rename('b4QC') // b4
+    var qcMask = qcState1.eq(0) // b1 ideal quality RED
+      // .and(qcState2.eq(0))      // b2 ideal quality
+      // .and(qcState3.eq(0))      // b3 " "
+      .and(qcState4.eq(0))      // b4 ideal quality GREEN
+    
+    var rgnd = image.normalizedDifference(['sur_refl_b01', 'sur_refl_b04'])
+    var iceMask = image.select('sur_refl_b04').gt(4000) //ice=0
+    var rgnd0 = rgnd.max(0) // set negative rgnd to 0
+      .updateMask(iceMask).unmask(0) // set ice to 0
+      .rename('RGND0')
+    // to do: replace the ice mask with NDSI-- basically just normalizes the band by SWIR
+    // var ndsi = image.normalizedDifference(['sur_refl_b04', 'sur_refl_b06']).rename('NDSI')
+
+    return rgnd0
+      // within the predicted 2019-2022 algae area
+      .updateMask(algaeMask) 
+      .updateMask(qaMask)
+      .updateMask(qcMask)
+      // .updateMask(nObsMask)
+      .set({'system:time_start': date.millis(), 'date': date.format('YYYY-MM-dd')})
+}
+
+var processTerra8 = function(image){
+  var date = image.date()
+  var stateQA = image.select('StateQA')
+  var cloudState = myFunctions.bitwiseExtract(stateQA, 0, 1).rename('cloudState')
+  var cloudShadowState = myFunctions.bitwiseExtract(stateQA, 2,2).rename('cloudShadowState')
+  var aerosolState = myFunctions.bitwiseExtract(stateQA, 6, 7).rename('aerosolState')
+  var cirrusState = myFunctions.bitwiseExtract(stateQA, 8, 9).rename('cirrusState')
+  var stateQAMask = cloudState.eq(0) // not cloudy
+    .and(cloudShadowState.eq(0)) // not cloud shadow
+    .and(aerosolState.neq(3)) // not high aerosol
+    .and(cirrusState.neq(3)) // not high cirrus
+
+  var qa = image.select('QA')
+  var qaState = myFunctions.bitwiseExtract(qa, 0, 1)
+  var qaMask = qaState.eq(0) // ideal quality
+  
+  var rgnd = image.normalizedDifference(['sur_refl_b01', 'sur_refl_b04'])
+  var iceMask = image.select('sur_refl_b04').gt(4000) //ice=0
+  var rgnd0 = rgnd.max(0) // set negative rgnd to 0
+    .updateMask(iceMask).unmask(0) // set ice to 0
+    .rename('RGND0')
+  // to do: replace the ice mask with NDSI-- basically just normalizes the band by SWIR
+  // var ndsi = image.normalizedDifference(['sur_refl_b04', 'sur_refl_b06']).rename('NDSI')
+
+  return rgnd0
+    .updateMask(algaeMask) 
+    .updateMask(stateQAMask)
+    .updateMask(qaMask)
+    .set({'system:time_start': date.millis(), 'date': date.format('YYYY-MM-dd')})
+}
+
+var myTerraDay = terraDay
+  .filter(ee.Filter.calendarRange(startMonth, endMonth, 'month'))
+  .map(processTerraDay)
+// print(myTerraDay.first())
+
+var myTerra8 = terra8
+  .filter(ee.Filter.calendarRange(startMonth, endMonth, 'month'))
+  .map(processTerra8)
+// print(myTerra8.first())
+
+var myAquaDay = aquaDay
+  .filter(ee.Filter.calendarRange(startMonth, endMonth, 'month'))
+  .map(processTerraDay)
+
+var myAqua8 = aqua8
+  .filter(ee.Filter.calendarRange(startMonth, endMonth, 'month'))
+  .map(processTerra8)
+
+
+// get the max RGND for each year ----------------------------
+
+var years = ee.List.sequence(2000, 2022)
+
+// export the Terra Day Max RGND composite time series
+// within the algae mask (can scale to glacier mask later in R)
+var maxRgndCol = ee.ImageCollection.fromImages(
+  years.map(function (y) {
+    return myTerraDay.select('RGND0')
+      .filter(ee.Filter.calendarRange(y, y, 'year'))
+      .max()
+      .set('year', y)
+}))//.aside(print, "max rgnd col")//.aside(Map.addLayer, {}, "max rgnd col")
+
+// for each year, calculate regional means
+var meanRgndTable = maxRgndCol.map(function(i){
+  return i
+    .reduceRegions({
+      collection: regions,
+      reducer: myFunctions.myMeanReducer, // the total algal biomass per region
+      scale: terraExportScale, // use lower resolution to mask at algaeMap resolution, and allow despeckler to work
+      crs: myCrs
+    }).map(function(f){
+      return f.set('year', i.get('year')).setGeometry(null) 
+    }) 
+}).flatten()
+Export.table.toDrive({
+  collection:meanRgndTable,
+  description: "meanMaxRgndRegionTerraDay"+terraExportScale,
+  folder:"modis",
+  selectors:['name','year','mean','stdDev','count']
+})
+
+// export the Terra-8 max rgnd composites
+var maxRgnd8Col = ee.ImageCollection.fromImages(
+  years.map(function (y) {
+    return myTerra8.select('RGND0')
+      .filter(ee.Filter.calendarRange(y, y, 'year'))
+      .max()
+      .set('year', y)
+}))//.aside(print, "max rgnd col")
+Map.addLayer(maxRgnd8Col.filter(ee.Filter.eq('year',2016)), 
+  myFunctions.rgndVisParam, "max rgnd8") // dont zoom in too far or cant see--descpeckly
+
+var meanRgnd8Table = maxRgnd8Col.map(function(i){
+  return i
+    .reduceRegions({
+      collection: regions,
+      reducer: myFunctions.myMeanReducer,
+      scale: terraExportScale, // use lower resolution to mask at algaeMap resolution
+      crs: myCrs
+    }).map(function(f){
+      return f.set('year', i.get('year')).setGeometry(null) 
+    }) 
+}).flatten()
+Export.table.toDrive({
+  collection:meanRgnd8Table,
+  description: "meanMaxRgndRegionTerra8"+terraExportScale,
+  folder:"modis",
+  selectors:['name','year','mean','stdDev','count']
+})
+
+
+// peak bloom composites -----------------
+// max RGND quality mosaics
+function makeDoyImage(i){
+  var doy = i.date().getRelative('day','year').toInt() 
+  var doyImage = ee.Image.constant(doy).toInt16().rename('doy')
+  return i.selfMask() // don't include RGND0 = 0 (eg a patch is ice all summer, the tie will choose the first occurrence of, shifting the mean DOY earlier in the season)
+    .addBands(doyImage)
+}
+
+  
+var maxRgndDoyComps = ee.ImageCollection.fromImages(years.map(function(y){
+  var thisYearsImages = myTerraDay
+    .filter(ee.Filter.calendarRange(y,y,'year'))
+    .map(makeDoyImage)
+  
+  // return image of DOY of maximum RGND0 for this year
+  return thisYearsImages
+    .qualityMosaic('RGND0').select('doy').rename('maxRgndDoy')
+    .set('year',y)
+}))
+
+
+var meanMaxRgndDoyStats = maxRgndDoyComps.map(function(i){
+  return i.reduceRegions({
+    collection: regions,
+    reducer: myFunctions.myMeanReducer,
+    scale: maxDoyScale, // mask at algae map resolution
+    tileScale: 4,
+    crs: myCrs
+  }).map(function(f){ return f.set('year',i.get('year'))})
+}).flatten()
+// print(meanMaxRgndDoyStats.first())
+
+Export.table.toDrive({
+  collection: meanMaxRgndDoyStats,
+  description: "meanMaxRgndDoyStats"+maxDoyScale,
+  folder: "modis"
+})
+
+
+// time series---------------------------------
+// if a column is null in the first image, that column is excluded!!
+
+var timeSeries = myTerraDay.map(function(i){
+  return i.select('RGND0').reduceRegions({
+      collection: regions,
+      reducer: myFunctions.myMeanReducer,
+      scale: terraExportScale, 
+      crs: myCrs
+    }).map(function(f){
+      return f.set('date', i.get('date')).setGeometry(null) 
+    }) 
+}).flatten()
+// print(timeSeries.first()) // timed out
+
+
+Export.table.toDrive({
+  collection: timeSeries,
+  description: "timeSeries",
+  folder: "modis",
+  selectors:['name','date','mean','stdDev','count']
+})
+
+var timeSeries8 = myTerra8.map(function(i){
+  return i.select('RGND0').reduceRegions({
+      collection: regions,
+      reducer: myFunctions.myMeanReducer,
+      scale: terraExportScale, 
+      crs: myCrs
+    }).map(function(f){
+      return f.set('date', i.get('date')).setGeometry(null) 
+    }) 
+}).flatten()
+
+Export.table.toDrive({
+  collection: timeSeries8,
+  description: "timeSeries8",
+  folder: "modis",
+  selectors:['name','date','mean','stdDev','count']
+})
+
+
+
+// AQUA --------------------------------
+var aquaYears = ee.List.sequence(2002, 2022)
+
+var maxRgndColAqua = ee.ImageCollection.fromImages(
+  aquaYears.map(function (y) {
+    var composite= myAquaDay.select('RGND0')
+      .filter(ee.Filter.calendarRange(y, y, 'year'))
+      .max()
+      .set('year', y)
+    var nBands = composite.bandNames().size()
+    return composite.set('nBands',nBands)
+})).filter(ee.Filter.neq('nBands',0))
+print(maxRgndColAqua)
+
+var meanRgndTableAqua = maxRgndColAqua.map(function(i){
+  return i
+    .reduceRegions({
+      collection: regions,
+      reducer: myFunctions.myMeanReducer, 
+      scale: terraExportScale, 
+      crs: myCrs
+    }).map(function(f){
+      return f.set('year', i.get('year')).setGeometry(null) 
+    }) 
+}).flatten()
+Export.table.toDrive({
+  collection:meanRgndTableAqua,
+  description: "meanMaxRgndRegionAquaDay"+terraExportScale,
+  folder:"modis",
+  selectors:['name','year','mean','stdDev','count']
+})
+
+// export the Aqua-8 max rgnd composites
+var maxRgnd8ColAqua = ee.ImageCollection.fromImages(
+  aquaYears.map(function (y) {
+    var composite= myAqua8.select('RGND0')
+      .filter(ee.Filter.calendarRange(y, y, 'year'))
+      .max()
+      .set('year', y)
+    var nBands = composite.bandNames().size()
+    return composite.set('nBands',nBands)
+})).filter(ee.Filter.neq('nBands',0))
+
+var meanRgnd8TableAqua = maxRgnd8ColAqua.map(function(i){
+  return i
+    .reduceRegions({
+      collection: regions,
+      reducer: myFunctions.myMeanReducer,
+      scale: terraExportScale, // use lower resolution to mask at algaeMap resolution
+      crs: myCrs
+    }).map(function(f){
+      return f.set('year', i.get('year')).setGeometry(null) 
+    }) 
+}).flatten()
+Export.table.toDrive({
+  collection:meanRgnd8TableAqua,
+  description: "meanMaxRgndRegionAqua8"+terraExportScale,
+  folder:"modis",
+  selectors:['name','year','mean','stdDev','count']
+})
+
+
+var maxRgndDoyCompsAqua = ee.ImageCollection.fromImages(aquaYears.map(function(y){
+  var thisYearsImages = myAquaDay
+    .filter(ee.Filter.calendarRange(y,y,'year'))
+    .map(makeDoyImage)
+  
+  // return image of DOY of maximum RGND0 for this year
+  return thisYearsImages
+    .qualityMosaic('RGND0').select('doy').rename('maxRgndDoy')
+    .set('year',y)
+}))
+
+
+var meanMaxRgndDoyStatsAqua = maxRgndDoyCompsAqua.map(function(i){
+  return i.reduceRegions({
+    collection: regions,
+    reducer: myFunctions.myMeanReducer,
+    scale: maxDoyScale, // mask at algae map resolution
+    tileScale: 4,
+    crs: myCrs
+  }).map(function(f){ return f.set('year',i.get('year'))})
+}).flatten()
+
+Export.table.toDrive({
+  collection: meanMaxRgndDoyStatsAqua,
+  description: "meanMaxRgndDoyStatsAqua"+maxDoyScale,
+  folder: "modis"
+})
+
+
+
+// // Sen's slope per pixel -------------------------------
+
+// var slopeImage = maxRgndCol.map(function(image) {
+//     return image.addBands(image.metadata('year')) // add a time band
+//   })
+//   .select(['year', 'RGND0']) // predictor, response
+//   .reduce(ee.Reducer.sensSlope())
+//   .select('slope')
+//   .updateMask(algaeMask)
+//   // .aside(print)
+  
+
+// Map.addLayer(
+//     slopeImage,
+//     {min: -1, max: 1, palette:["red", "white","green"]},
+//     'sens slope');
+
+// taking the median of sen's slopes per 10k grid cell
+// (reasonable, since this is in itself already a sort of mean) 
+// by aggregating (eg mean) at higher than pixel resolution we dilute the effect, because
+// eg the redness might only increase in part of the 10k grid cell
+
+// var medianSens = combSens.reduceRegions({
+//   collection: smallGrid,
+//   reducer: myFunctions.myCombinedReducer,
+//   scale: 500,
+//   tileScale: 4
+// })
+// // at least 5 valid slope pixels per 50 k grid cell
+// .filter(ee.Filter.gt('hi_sens_count',3))//.limit(2).aside(print, "count gt 5")
+// // print(medianSens.limit(2))
+// .map(function(f){return f.set('cell_id', f.get('system:index') )} )
+
+// //user mem limit exceeded
+// Export.table.toDrive({
+//   collection: medianSens, 
+//   description: "westcoast_sens_by_elv_20k",
+//   folder: "figs",
+//   fileFormat: "KML"
+// })
+// // dont forget to divide by 1000 to put slope units back into RGND units
+
+
+// // median Sens slope in Interior and Coast Ranges
+// myRgndCol // already "both" algae masked
+//   .map(function(image) {
+//     return image.addBands(image.metadata('year').subtract(2000)) // add a time band
+//   })
+//   .select(['year', 'RGND0_MSKD']) // predictor, response
+//   .reduce(ee.Reducer.sensSlope()) // slope and intercept bands
+//   .reduceRegions({
+//     collection: ranges,
+//     reducer: ee.Reducer.median(),
+//     scale: 500
+//   })//.aside(print, "coast v interior median Sens")
+// // range,slope,0intercept,2000intercept
+// // bc coast,0.24,-458,5
+// // interior 0.55,-1074,20
+// // why higher slope in the coast? map shows interior as more intense change. 
+// // why is the intercept positive?
+
+
+
+
+
+
+
+
+
+
+
+// // Regional stats with 5km downslope buffer -----------------------------------------------
+// // approach: first grow algal blooms using low pass function. 
+// // then mask with glacier and above median elv (stored as per-object band, )
+
+
+// var objectId = loAlgaeMask.rename('algae_mask')
+//   .connectedComponents({
+//     connectedness: ee.Kernel.plus(1),
+//     maxSize: 1024
+//   })//.aside(Map.addLayer)
+
+// // find the minimum elevation per object
+// var minElv = objectId
+//   .addBands(dem_raw)
+//   .reduceConnectedComponents({
+//     reducer: ee.Reducer.min(),
+//     labelBand: 'labels'
+//   }).select('dem').rename('min_elv')
+
+// // mask dem by min elev
+// var minMask = dem_raw.eq(minElv.select('min_elv')).selfMask()
+// // Map.addLayer(minMask)
+
+// // buffer min points
+// var buff = minMask.focalMin({radius:3000, units:'meters'}) // extend 3km downhill
+//   .updateMask(glacierMask)
+//   // .aside(Map.addLayer)
+
+// // add to the original algaeMask
+// var expandedAlgaeMask = bothAlgaeMask.unmask()
+//   .or(buff.unmask())
+//   .aside(Map.addLayer)
+
+// // compute the trend data again for the expanded Algae Mask
+// // make sure not to export at too high a scale, to avoid splitting the patches
+// var maxRgndColExp = ee.ImageCollection.fromImages(
+//   years.map(function (y) {
+//     return myTerraDay.select('RGND0_MSKD')
+//       .filter(ee.Filter.calendarRange(y, y, 'year'))
+//       .max()
+//       .multiply(1000).toInt16() // report to three decimel places (round down) to speed up sum reducer
+//       .set('year', y)
+//       .updateMask(expandedAlgaeMask)
+// }))//.aside(print, "max rgnd col")//.aside(Map.addLayer, {}, "max rgnd col")
+
+// // for each year, calculate regional means
+// var meanRgndExpTable = maxRgndColExp.map(function(i){
+//   var yearMeanRgnd = i.reduceRegions({
+//     collection: ranges,//myRegions
+//     reducer: myFunctions.myCombinedReducer,
+//     scale: 500
+//   }); // a FC
+//   // ensure each feature is labelled with a property
+//   var plusProperties = yearMeanRgnd.map(function(f){
+//     return f.set({
+//       'year':i.get('year')
+//     }) 
+//   }) 
+//   return plusProperties
+// }).flatten()
+// // print(meanRgndExpTable.limit(2))
+// Export.table.toDrive(meanRgndExpTable, "regional_yrly_rgnd_stats_expanded","modis") // see modis_trend_map_2.R
+
+
+
+
+
+
+
+
+
+
+
+
+// // annual mean stats per grid cell, so i can compute significance ----------------------------------------
+
+
+
+// // get max ann RGND0 for 2019-2022 from S2 and MODIS
+// // 8 vals per grid cell, 4 yrs times 2 platforms
+// function getMeanGrid(mask){
+//   var fc = myRgndCol
+//     .map(function(image){
+//       image = image.updateMask(mask)
+//       return image.reduceRegions({
+//         collection: smallGrid,
+//         reducer: myFunctions.myMeanReducer,
+//         scale: 500,
+//         tileScale: 4
+//       }) // returns smallGrid, mean, count, and stdDev
+//       .map(function(f){
+//         return f.setGeometry(null).set({
+//           // // for some reason getting a ?bug error only upon export, `count` is present but not `mean` which is missing values for some elts 
+//           // 'modis_mean': ee.Algorithms.If(f.get('mean'),f.get('mean'),"NA"),
+//           // 'modis_std_dev': ee.Algorithms.If(f.get('stdDev'),f.get('stdDev'),"NA"),
+//           // 'modis_count': f.get('count'),
+//           'year': image.get('year'), 
+//           'cell_id':f.get('system:index') // use for joining with S2 data
+//         })
+//       })
+//     }).flatten()
+//   return ee.FeatureCollection(fc).filter(ee.Filter.neq('count',0))// some bug, if the first count is zero, dosen't return mean etc
+// } 
+
+// var hiModisGrid = getMeanGrid(hiAlgaeMask)
+// // print(hiModisGrid.limit(2))
+// var loModisGrid = getMeanGrid(loAlgaeMask)
+// var bothModisGrid = getMeanGrid(bothAlgaeMask)
+
+// // Export.table.toDrive({
+// //   collection: hiModisGrid, 
+// //   description: "hi_modis_mean_max_20k_bcaea",
+// //   folder: "modis",
+// //   fileFormat: "CSV"
+// // })
+
+
+// // Export.table.toDrive({
+// //   collection: loModisGrid, 
+// //   description: "lo_modis_mean_max_20k_bcaea",
+// //   folder: "modis",
+// //   fileFormat: "CSV"
+// // })
+// Export.table.toDrive({
+//   collection: bothModisGrid, 
+//   description: "both_modis_mean_max_20k_bcaea",
+//   folder: "modis",
+//   fileFormat: "CSV"
+// })
+
+
+// // per glacier stats ------------
+
+
+// // var myGlacIDs = ['G218512E62117N'] // glaciers with > 10% algae cov
+// var glac_id_list = glac_ids.aggregate_array('glac_id')//.aside(print)
+// var myGlims  = glims.filterBounds(regions.geometry())
+//   .filter(ee.Filter.gt('db_area', 1)) //gt 1 km2
+//   .distinct('glac_id')// remove duplicates
+//   .filter(ee.Filter.inList('glac_id', glac_id_list))
+
+
+// // mean JA SDI per year, per glacier within the algal area
+// var terraDay2 = myTerraDay
+//   .select('RGND0')
+//   .filter(ee.Filter.calendarRange(7, 8, 'month'))
+//   .map(function(i){
+//     return i.updateMask(bothAlgaeMask) 
+//   })
+
+// // temporal reducer
+// var yrs = ee.List.sequence(2000,2022)
+// var means = ee.ImageCollection.fromImages(
+//   yrs.map(function(y){
+//     return terraDay2.filter(ee.Filter.calendarRange(y,y,"year")).mean().set('year',y)
+//   })
+// ).aside(print)
+
+
+// // spatial reducer
+// var meanSDI = means.map(function(i){
+//   return i.reduceRegions({
+//     collection: myGlims,
+//     reducer: ee.Reducer.mean(),
+//     scale: 500,
+//     crs:'EPSG:4326'
+//   }).map(function(f){return ee.Feature(null, {
+//     'year':i.get('year'),
+//     'sdi_ja_mean': f.get('mean'),//typo, in original version this said jja
+//     'glac_id':f.get('glac_id')
+//     })
+//   }) 
+// }).flatten()
+// // print(meanSDI.limit(2))
+// Export.table.toDrive(meanSDI, "meanAnnSDIPerGlacier","modis")
+
+
+
+
+
+
+
+
+
+
+// //scratch- -----------------------
+
+
+
+// // create map grid
+// var bc_albers = myFunctions.makeAeaProj([-135, 57],[49, 63])
+// var smallGrid = regions.geometry()
+//   .coveringGrid(bc_albers, 20000)//.aside(Map.addLayer)
+
+
+// smallGrid = algaeMask
+//   .reduceRegions({ 
+//       collection: smallGrid,
+//       reducer: ee.Reducer.count().combine(
+//         ),
+//       scale: 50
+//   })
+// .filter(ee.Filter.gt('count',50)) // remove grid cells with less algae than would equal one modis grid cell
+// .select([]) // remove all properties
+// .aside(Map.addLayer,{},"small grid")
+
+
+// // annotate grid cells with range meta
+// var spatialFilter = ee.Filter.intersects({
+//   leftField: '.geo',
+//   rightField: '.geo',
+//   maxError: 500
+// });
+
+// var saveAllJoin = ee.Join.saveAll({
+//   matchesKey: 'region',
+// });
+
+// var intersectJoined = saveAllJoin.apply(smallGrid, regions, spatialFilter);
+// print(intersectJoined.first())
+// intersectJoined = intersectJoined.map(function(f) {
+//   var region = ee.Feature(ee.List(f.get('region')).get(0)).get('region')
+//   return f.set('region', region);
+// })
+// print(intersectJoined.first())

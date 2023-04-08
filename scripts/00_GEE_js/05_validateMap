@@ -1,0 +1,557 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var algae = /* color: #d63000 */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 1,
+          "system:index": "0"
+        }),
+    localDust = /* color: #98ff00 */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 2,
+          "system:index": "0"
+        }),
+    windDust = /* color: #0b4a8b */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 3,
+          "system:index": "0"
+        }),
+    glare = /* color: #ffc82d */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 4,
+          "system:index": "0"
+        }),
+    rainbow = /* color: #00ffff */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 5,
+          "system:index": "0"
+        }),
+    shadow = /* color: #bf04c2 */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 6,
+          "system:index": "0"
+        }),
+    haze = /* color: #ff0000 */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 7,
+          "system:index": "0"
+        }),
+    ice = /* color: #00ff00 */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 8,
+          "system:index": "0"
+        }),
+    crevasse = /* color: #0000ff */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 9,
+          "system:index": "0"
+        }),
+    other = /* color: #999900 */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 10,
+          "system:index": "0"
+        }),
+    white = /* color: #009999 */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 11,
+          "system:index": "0"
+        }),
+    algaeMap = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/aatrainclean2");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+This script is used to manually validate predicted algae images, 
+given a set of points (created isomg 04_getAreaAndPts.js)
+1) User checks if prediction matches my classification based on visual interp (save to spreadsheet, auto generated each run)
+2) sample images for new training data
+
+TO DO:
+speedup by raw filtering of image collection, no mosaics?
+  but then more computation to make timeseries chart...
+farm script out into module scripts, use require
+auto scale brightness
+dropdown to choose region
+check coverage of region. Seems to be an issue with ordering north to south
+*/
+
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions');
+var palettes = require('users/gena/packages:palettes');
+
+// CHANGE THIS, specify random point collection to load
+var randomPtBasename = 'coastNorth_R50_trainclean2_3'
+var randomPoints = ee.FeatureCollection('projects/ee-caseyengstrom/assets/globalSnowAlgae/4_randomPoints/' + randomPtBasename)
+var regions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/glacierRegionsV12");
+var glacierImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages/glaciers")
+var forestPath = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/2_trainDat/trainclean2_trees");	
+
+// params for loading S2 RGB imagecollections 
+var dayInc = 5
+var max_cc = 40
+var max_sza = 80 // 80 for midlatitudes
+var thresh = 0.41
+var prj = 'EPSG:4326'
+
+// params for collecting training data
+var labelledOutpath = 'no' // CHANGE THIS set output directory in google drive
+var getAtRes = 10 // sample at same resolution used for map making
+var nPtsToSample = 25 // max per class
+var minPointDist = 50 //m, ensure small sample areas are not over-represented in the training data
+
+
+
+// misc setup --------------------------------------------------
+
+var glacierImage = glacierImages.map(function(i){
+  return ee.Image(i.rename('glacier')) 
+}).mosaic()
+var glacierMask = glacierImage.unmask()
+
+// deal with problematic col names of earlier datasets
+// should be 'a_id', was 'id'
+randomPoints = randomPoints.map(function(feat){
+  var oldid = feat.get('id')
+  return ee.Algorithms.If(oldid, feat.set('a_id', oldid), feat)
+})
+
+
+// Create Sentinel-2 mosaics for region and process --------------------------------
+
+var myS2 = myFunctions.filterS2ForAlgae({
+  roi: randomPoints.geometry(),
+  maxCloudCover: max_cc,
+  minSnowPercent: 0.5, 
+  maxSZA: max_sza
+});
+// print(myS2.size(), probImage.get('n_images'), "current:used, check S2 image collections the same size")
+// dosen't really matter if the roi is larger, because of my on the fly search strategy
+
+
+// Create weekly mosaics. This removes redundant images for polar regions with high flyover
+// making fewer images needed to look at. Also solves the problem of points being located 
+// on the edge of an image
+
+// (1) make a list of weeks in each year
+var millisInWeek = 1000*60*60*24*dayInc;
+
+var milliList = ee.List.sequence(
+  ee.Date("2019-07-01").millis(), 
+  ee.Date("2022-09-01").millis(), 
+  millisInWeek
+)
+
+// load precomputed decision trees
+var decisionTrees = myFunctions.decodeFeatureCollection(forestPath)	
+var trainedClassifier = ee.Classifier.decisionTreeEnsemble(decisionTrees).setOutputMode('raw')				
+
+// make a mosaic for a point on the fly
+function makeMosaic(roi){
+  // (2) make a low-cloud mosaic for each week in the list
+  var weeklyMosaics = ee.ImageCollection.fromImages(
+    milliList.map(function (milli) {
+      var date = ee.Date(milli);
+      var images = myS2
+        .filterBounds(roi.buffer(5000, 1000)) // mosaic within a 5k buffer of the point
+        .filterDate(date, date.advance(dayInc,'day')) 
+        .sort('CLOUDY_PIXEL_PERCENTAGE'); // clear images will be on top
+      
+      var dateProperties = {
+          'date': date.format("YYYY-MM-dd"), 
+          'milli':milli
+        };
+      // if there are images in the specified date range, add the mosaic to the collection, 
+      return ee.Algorithms.If(images.size().neq(0), images.mosaic().set(dateProperties));
+  })).map(function(i){return i.set('index',i.get('system:index'))}); // add an index for counting (not reccommended to use system properties)
+  
+  // (3) add classifier bands to weekly mosaics
+  // and get the probability at each point
+  var mosaicsPlus = weeklyMosaics.map(function(image){
+    var plusNDs = myFunctions.addNormalizedBands(image);
+    var redMask = myFunctions.redSnowMask(plusNDs); // pre-processing step, mask non-red snow
+    var maskedImage = plusNDs.updateMask(redMask).updateMask(glacierMask); 
+    // using precomputed decision trees
+    var raw = maskedImage.classify(trainedClassifier, 'raw');
+    var probability = raw.arrayReduce(ee.Reducer.mean(), ee.List([0])).arrayGet(0).rename('CLASS_PROB')	
+
+    var probUnmasked = probability.unmask().rename('ALGAE_PROB'); // for Chart, so you can click on most dates
+    var classification = probability.gt(thresh).rename('CLASSIFICATION'); // masked by RGND, a binary image
+    
+    return image
+      .addBands(plusNDs.select('RGND'))
+      .addBands(plusNDs.select('GBND'))
+      .addBands(redMask)
+      .addBands(probability)
+      .addBands(probUnmasked)
+      .addBands(classification)
+      .reproject({crs:prj, scale:10}) // avoid projection error, reproject
+  });
+  return mosaicsPlus
+}
+
+
+// UI functions  -------------------------
+
+// assign these before first call to clearGeoms
+var drawingTools = Map.drawingTools();
+var drawnLayers = drawingTools.layers() // all layers should be present at start
+
+// printed labels for my use only
+var nAlgaeImgsAtPtLabel  = ui.Label("n unmasked prob images at pt label");  // count the number of images with CLASS_PROB band at point
+print(nAlgaeImgsAtPtLabel);
+var coordLab = ui.Label("coords")
+print(coordLab)
+
+var displayImage; // store as global var for brightness slider
+// var clientDate; // store as global for annotating training data
+var mosaicsPlus;
+var hrs;
+
+function loadLayer(x, y, series){ // series arg selects the series
+  displayImage = ee.Image(mosaicsPlus
+    .filter(ee.Filter.eq('milli', x)) // ie image property: date = date from the x axis of the chart 
+    .first());
+
+  var date = displayImage.get('date'); 
+  ee.Date(date).format('MMM d, YYYY').evaluate(function(date){ dateLabel.setValue(date)}); // update dateLabel
+  
+  hrs = ee.Number(x).divide(1000).divide(3600).toInt()
+  // clientDate = x.divide(1000); // will throw error if no image found on date (could happen using date shifter)
+
+  Map.layers().set(1, ui.Map.Layer(displayImage, myFunctions.rgbVisParam, "RGB " )); //+ clientDate
+  Map.layers().set(2, ui.Map.Layer(displayImage.select('CLASS_PROB'), 
+                                    myFunctions.classVisParam, "class prob ", false));
+  slider.setValue(11000, false); // refresh the slider value
+  clearGeoms();
+}
+
+function refreshChart(roi){
+  // initialize map, automatically zoom to image with highest mean CLASS_PROB in buffer
+  // TO DO: would be more efficient to extract the values from the chart (or do this first and then plot the mean values)
+  mosaicsPlus = makeMosaic(roi)
+
+  var highestProbImage = mosaicsPlus.map(function(i){
+    var meanProb = i.select('ALGAE_PROB')
+      .reduceRegion(ee.Reducer.mean(), roi, 30)
+      .get('ALGAE_PROB');
+    return i.set('meanProbAtPt',meanProb);
+  }).sort('meanProbAtPt', false).first();
+  loadLayer(highestProbImage.get('milli')); // pass milli as the x arg (leave y and series null)
+  
+  // generate a time series chart of mean ALGAE_PROB at roi
+  var chart = ui.Chart.image.series({
+    imageCollection: mosaicsPlus.select('ALGAE_PROB'),
+    region: roi,
+    reducer: ee.Reducer.mean(),
+    scale: 30, // this is higher to speed things up, ok if it dosen't match the table output exactly
+    xProperty: 'milli'
+  });
+  chart.onClick(loadLayer); // register a callback upon click
+  panel.widgets().set(1, chart); // update the chart (second layer)
+}
+
+// wrapper to refreshChart, takes index to random points as arg
+function refreshChartForRandomPointId(id){
+  id = Number(id)
+  var myPoint = randomPoints.filter(ee.Filter.eq('a_id',id)).first()
+  var ptGeom = myPoint.geometry(2) // limit error to 2 m for accuracy
+  var roi = ptGeom.coveringGrid('EPSG:4326', 50).geometry()
+
+  refreshRoiOnMap(roi);  
+  refreshChart(roi);
+  
+  // // update labels for me
+  // var imgCountImage = mosaicsPlus.select('CLASS_PROB').reduce(ee.Reducer.count());
+  // var nAtPt = imgCountImage.sample(ptGeom, 30).first(); // feature 
+  // ee.Algorithms.If(nAtPt, nAtPt.get('CLASS_PROB_count'), ee.Number(0))
+  //   .evaluate(function(n){ nAlgaeImgsAtPtLabel.setValue(n+ " CLASS images unmasked at pt")});
+  ptGeom.coordinates().evaluate(function(coords){coordLab.setValue(coords)})
+} 
+
+// wrapper to refreshChart for Map click
+function refreshRoiOnMap(roi){
+  var userPointLayer = ui.Map.Layer(ee.FeatureCollection(roi).style({color:"green", fillColor:"#00000000"}), {},"Chart location");
+  Map.layers().set(3, userPointLayer); // layer 4
+  Map.centerObject(roi, 15);
+  refreshChart(roi);
+}
+
+// update the point index counter in panel 
+// on click, triggers refreshChartForRandomPointId()
+function shiftPt(increment){
+  var currentIndex = randomPtIndexTextbox.getValue();
+  var newIndex = Number(currentIndex) + increment; // advance or subtract the counter
+  randomPtIndexTextbox.setValue(String(newIndex)); // triggers refresh chart
+}
+
+// wrappers for shiftPt used by forward and advance buttons
+function shiftUp(){shiftPt(1)} 
+function shiftDown(){shiftPt(-1)}
+
+// called by slider, allow user to adjust image darkness
+function updateBrightness(val){
+  var newRGBLayer = ui.Map.Layer(displayImage, {gamma: 0.3, min:0, max:val, bands:['B4','B3','B2']});
+  Map.layers().set(1,newRGBLayer);
+}
+
+// navigate through the imageCollection using next and prev buttons
+function skipToImage(increment){
+  var index = displayImage.get('index').getInfo();
+  var newIndex = Number(index)+increment;
+  displayImage = mosaicsPlus.filter(ee.Filter.eq('index',String(newIndex))).first(); // reset the global var
+  loadLayer(displayImage.get('milli'));
+}
+// wrappers for skipToImage
+function nextImage(){skipToImage(1)}
+function previousImage(){skipToImage(-1)} 
+
+
+
+
+
+// Initialize UI ---------------------------------------------
+
+var vir10= ee.Dictionary({ // for visualizing random points
+  0: "#440154",
+  1: "#482878",
+  2: "#3e4989",
+  3: "#31688e",
+  4: "#26828e",
+  5: "#1f9e89",
+  6: "#35b779",
+  7: "#6ece58",
+  8: "#b5de2b",
+  9: "#fde725" 
+})
+
+// initialize Map
+
+Map.addLayer(algaeMap.select('CLASS_PROB'), {palette:palettes.matplotlib.viridis[7]}, "probability"); // layer 0
+Map.layers().set(1, ee.Feature(null)); // placeholder layer RGB
+Map.layers().set(2, ee.Feature(null)); // placeholder layer class prob 
+Map.layers().set(3, ee.Feature(null)); // placeholder layer my pt
+var displayPoints = randomPoints.map(function(f) {
+  var decile = ee.Number(f.get("decile"))
+  return f.set({style: {color: vir10.get(decile) }})
+})
+Map.layers().set(4, ui.Map.Layer(displayPoints.style({styleProperty: "style"}), {}, "all random pts", false))
+Map.layers().set(5, ee.Feature(null)); // placeholder layer sampled rand pts
+Map.layers().set(6, ee.Feature(null)); // placeholder layer masked predAlgae
+
+// comb results
+// for comparison purposes 2023-02-06
+// Map.layers().set(7, ui.Map.Layer(image.select('CLASS_PROB'), {palette:palettes.matplotlib.viridis[7]}, "comb max prob")); // placeholder layer masked predAlgae
+// Map.layers().set(8, ui.Map.Layer(image.select('CLASS'), {palette:["white","red"], min:0, max:1}, "comb classification")); 
+
+// assemble panel components
+var slider = ui.Slider({
+  min: 7000,
+  max:12000,
+  value:11000,
+  step:500,
+  onChange:updateBrightness,
+  style:{width:'400px'}
+})
+
+var startingPoint = randomPoints.sort('a_id',false).first()
+var startPtId = startingPoint.get('a_id').getInfo()
+
+var randomPtIndexTextbox = ui.Textbox({value: startPtId, onChange: refreshChartForRandomPointId, style:{width: '50px'}});
+
+var randomPointRow = ui.Panel({layout: ui.Panel.Layout.flow('horizontal')})
+  .add( ui.Label("Random point: "))
+  .add( ui.Button({label:"<",onClick:shiftDown, style:{width: '50px'} }) )
+  .add( randomPtIndexTextbox )
+  .add( ui.Button({label:">", onClick: shiftUp, style:{width: '50px'} }) );
+
+var dateLabel = ui.Label("");
+
+var imageShifterRow = ui.Panel({layout: ui.Panel.Layout.flow('horizontal')})
+  .add( ui.Label("Image: "))
+  .add( ui.Button({label:"<",onClick:previousImage, style:{width: '50px'} }) )
+  .add( dateLabel )
+  .add( ui.Button({label:">", onClick: nextImage, style:{width: '50px'} }) );
+
+var mapClickButton = ui.Button({
+  label: 'Click to refresh chart for point',
+  onClick: function() {
+    Map.style().set('cursor', 'crosshair');
+    // Map.drawingTools().setShape('polygon')
+    // Temporarily allow the map to listen to the mouse
+    var listenerId = Map.onClick(function(coords) {
+      var point = ee.Geometry.Point(coords.lon, coords.lat);
+      refreshRoiOnMap(point);
+      Map.style().set('cursor', 'hand');
+      Map.unlisten(listenerId);
+    });
+  }
+});
+
+// assemble the final panel
+var panel = ui.Panel({style: {width: '500px'}})
+  .add(randomPointRow); // panel index 0
+
+
+refreshChartForRandomPointId(startPtId); //initialize the chart for the point with the highest
+
+panel = panel
+  .insert(2, imageShifterRow)
+  .insert(3, slider)
+  .insert(4, mapClickButton);
+
+ui.root.add(panel);  
+
+
+
+
+
+
+// Sampling ----------------------------
+
+
+
+// clear geometries within all drawnLayers 
+function clearGeoms(){
+  for (var i = 0; i < drawnLayers.length(); i = i + 1){
+    var geoms = drawnLayers.get(i).geometries();
+    // remove all geoms in layer
+    while(geoms.length()>0){
+      geoms.remove(geoms.get(0));
+    }
+  }
+}
+clearGeoms();
+
+function mySample(){
+  // loop through the drawingTools.layers to make an updated feature collection
+  var list = ee.List([])
+  for(var i = 0; i<drawnLayers.length(); i=i+1){ // excluding the maskAlgaeHere geom, do this for each class type
+    var myLayer = drawnLayers.get(i)
+    if(myLayer!==undefined){
+      var feature = ee.Feature(myLayer.toGeometry(),{'class': i+1}) // annotate it as the corect class
+      list = list.add(feature)// add it to the list
+    }
+  }
+  var labels = ee.FeatureCollection(list)
+
+  // convert labelled vectors to image
+  var classImage = ee.Image().byte().paint(labels,'class').rename('class').selfMask()
+  var classMasked = classImage.updateMask(displayImage.select('REDMASK'))
+  
+  var sampled = displayImage
+    .select(['B1','B2','B3','B4','B5','B6','B7','B8','B8A','B9','B11','B12'])
+    .addBands(classMasked)
+    .stratifiedSample({
+      numPoints: nPtsToSample,
+      classBand: 'class',
+      region: labels.geometry(), // must specify region for a mosaic, otherwise can't find footprint
+      seed: 0,
+      scale: getAtRes,
+      geometries: true
+    })
+  
+  sampled = myFunctions.filterDistance(sampled, minPointDist);//Collection.geometry: Unable to perform this geometry operation. Please specify a non-zero error margin.
+  
+  Map.layers().set(5, ui.Map.Layer(sampled, {}, "sampled pts"),false) 
+  
+  var bounds = labels.geometry().bounds()
+  var labs = labels.filterBounds(bounds)
+    .aggregate_array('class').getInfo().toString().replace(/,/g,'') // client side after getInfo()
+  var rand = myFunctions.randomString(2) // add random identifier to each filename to avoid duplicates
+  var exportID = probImageBasename.slice(0,2) + "_" + labs + "_" + hrs.getInfo() + "_" + rand
+  Export.table.toDrive({
+    collection: sampled,
+    description: exportID, 
+    folder: labelledOutpath,
+    fileNamePrefix: exportID
+  })
+  
+  clearGeoms();
+}
+
+var sampleButton = ui.Button("sample",mySample);
+print(sampleButton);
+
+
+
+
+
+
+// // Manual algae masking -----------------------------------------
+
+// var polishedExportAssetID = assetName + map_version + "_polished" ;
+
+
+// var maskButton = ui.Button("export polished", maskAndExport);
+// print(maskButton);
+
+// function maskAndExport(){
+//   // get the client side maskAlgaeHere geometry (layer 0)
+//   var updatedMaskAlgaeHere = drawnLayers.get(0).toGeometry() 
+  
+//   // if the geometry is non-zero, apply the mask
+//   var exportImage = ee.Algorithms.If(
+//     updatedMaskAlgaeHere.coordinates().size().gt(0),// if a maskAlgaeHere layer is indicated
+//     probability.updateMask(ee.Image(1).where(ee.Image(2).clip(updatedMaskAlgaeHere), 0)),// apply the mask 
+//     probability// otherwise just return the image
+//   )
+  
+//   // check that the image is masked as expected
+//   Map.layers().set(6, ui.Map.Layer(ee.Image(exportImage), 
+//     {palette:"red"}, "masked image")) ;
+//     // and export
+//   Export.image.toAsset({
+//     image:ee.Image(exportImage),
+//     description: polishedExportAssetID,
+//     assetId:"globalSnowAlgae/3_algaeMaps/" + polishedExportAssetID,
+//     crs: mapAsset.projection().crs().getInfo(), // keep the original projection
+//     scale: 30,
+//     maxPixels: 1e13
+//   });
+// }
+
+// var map_id = assetName.split("_")[0] // e.g. "ak5" (remove the underscore and seed)
+// var map_version = map_id.replace(/\D/g,'') // strip non-numeric chars
+
+
+// var examplePoint = ee.Feature(randomPoints.first())
+// var rangeList = examplePoint.getString('ranges').decodeJSON()
+// var myRanges = glacierRegions.filter(ee.Filter.inList('range',rangeList))
+// var rangeGeom = myRanges.geometry()
+// var myRegion = ee.Feature(myRanges.first()).get('region')
+// var glacierMask = glacierImages
+//   .filter(ee.Filter.eq('region',myRegion))
+//   .mosaic()
+//   .unmask()
+
+    // .addBands(imageForOtherSampling) 
+
+  // var imageForAlgaeSampling = classImage
+  //   .updateMask(displayImage.select('CLASSIFICATION').not()) /// TO DO___********************
+  
+  // var imageForOtherSampling = classImage
+  //   .updateMask(displayImage.select('CLASSIFICATION')) // only sample areas that were labelled as algae (assuming false positives are the problem here)
+  
+  // provide the same training data as was used to make the map
+
+// var classifier = ee.Classifier.smileRandomForest({
+//     numberOfTrees: probImage.get('n_tree'), 
+//     variablesPerSplit: probImage.get('mtry'),
+//     minLeafPopulation: probImage.get('minn'), 
+//     seed: probImage.get('seed')
+// }).setOutputMode('PROBABILITY')
+
+// var my_bands = ["ND2_1","ND5_2","ND5_3","ND6_2","ND4_2","ND2_8A","ND2_9",
+// "ND5_6","ND4_8","ND2_7","ND5_4","ND6_3","ND2_8","ND4_6","ND2_11","ND2_12",
+// "GBND","NDSI","RGND",
+// "B1","B2","B3","B4","B5","B6","B7","B8","B8A","B9","B11","B12"]
+
+// var trainedClassifier = classifier.train(trainingData, 'CLASS', my_bands); // return probability
+  
+  // var trainingData = ee.FeatureCollection('projects/ee-caseyengstrom/assets/globalSnowAlgae/2_trainDat/' + trainDatBasename)

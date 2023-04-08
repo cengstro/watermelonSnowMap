@@ -1,0 +1,104 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var contryOutlines = ee.FeatureCollection("USDOS/LSIB/2017"),
+    aoi = /* color: #ffffff */ee.Geometry.Polygon(
+        [[[-150.9938264515689, 58.95802435853087],
+          [-149.50123503097288, 59.46324654027393],
+          [-145.41966124672655, 59.295017858738255],
+          [-136.96215536031215, 58.127736692415766],
+          [-135.89164431724257, 58.29177789950585],
+          [-134.26428214439107, 58.041097765587416],
+          [-133.54758575316717, 57.0745723435282],
+          [-132.51591190000738, 56.569840640909725],
+          [-132.33286690926053, 55.78378876330608],
+          [-131.85088044842257, 55.04591352513047],
+          [-131.79923009386286, 54.45503537206681],
+          [-129.84511155572756, 52.066344130843056],
+          [-124.07054397882133, 48.82560982282552],
+          [-121.83124027168016, 48.797119101239005],
+          [-123.03489669658113, 50.437743328624855],
+          [-127.60084130888872, 52.5545791312259],
+          [-129.82947704712083, 54.89139764722318],
+          [-135.07654720788165, 59.530809387644645],
+          [-138.76305525391427, 60.08257382960223],
+          [-143.1076674527301, 60.517661253168555],
+          [-144.7523263548339, 60.62018046827191],
+          [-145.82829747670218, 61.09585284567947],
+          [-147.82480671829168, 61.48609253743296],
+          [-148.72487365508536, 60.81929346916498],
+          [-150.61271237286957, 59.80903449916478],
+          [-150.96411793337867, 59.39827671060566],
+          [-151.79817266159506, 59.19675265452501]]]),
+    geometry = 
+    /* color: #0b4a8b */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-125.4937400140118, 52.20292920056246],
+          [-125.4937400140118, 52.00047521706394],
+          [-125.0542868890118, 52.00047521706394],
+          [-125.0542868890118, 52.20292920056246]]], null, false),
+    geometry2 = 
+    /* color: #ffc82d */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-126.0210837640118, 51.824271136010694],
+          [-126.0210837640118, 51.647375132069676],
+          [-125.4497947015118, 51.647375132069676],
+          [-125.4497947015118, 51.824271136010694]]], null, false),
+    geometry3 = 
+    /* color: #00ffff */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-126.2847556390118, 51.469786181003045],
+          [-126.2847556390118, 51.153889759622956],
+          [-125.5596579827618, 51.153889759622956],
+          [-125.5596579827618, 51.469786181003045]]], null, false);
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+// attach dist to coast property to 10 km grid cells containing algal cover
+
+// Map.addLayer(contryOutlines)
+var countryImage = contryOutlines
+.map(function(f){
+  return f.set('dummy',1)
+}) 
+.reduceToImage({
+  properties: ['dummy'],
+  reducer:ee.Reducer.first()
+})
+
+var waterImage = countryImage.unmask().not()
+
+var waterFeature = waterImage.reduceToVectors({
+  geometry: aoi,
+  scale:1000
+}).filter(ee.Filter.eq('label',1)).map(function(f){
+  var newGeom = f.simplify(10000).geometry()
+  return ee.Feature(newGeom)
+})
+.aside(Map.addLayer)
+
+Export.table.toAsset(waterFeature, "westCoastVector", "globalSnowAlgae/westCoastVector")
+
+// demo code to get distances
+// var tt = ee.FeatureCollection([
+//   geometry,
+//   geometry2,
+//   geometry3
+// ]).aside(print)
+
+// var added = tt.map(function(f){
+  
+//   var dist = f.distance({'right':waterFeature.geometry(), 'maxError':100})
+//   return f.set('distance', dist)
+// }).aside(print)

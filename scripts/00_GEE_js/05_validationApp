@@ -1,0 +1,477 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var forestPath = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/2_trainDat/trainclean2_trees"),
+    glacierImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages2/glacierImages2"),
+    algaeMap = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/aaatrainclean2T"),
+    validationFinal = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/validation_final"),
+    regions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/regions_plus_thresholds"),
+    threshImage = ee.Image("projects/ee-caseyengstrom/assets/globalSnowAlgae/threshImage");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+POTENTIAL PROBLEMS:
+
+ 
+TO DO:
+sometimes it automatically chooses a cloudy image (interior north pt 1)
+  likely due to discrepancy in mosaicking. could automatically choose peak?
+chart slow to respond to click--double loading still a problem, it loads the blank image first
+zoom to a red point, chart does not always recover the image I used to label
+format Our label and Prediction in bold
+out of bounds error if number exceeds n points
+add "loading.." messages where possible
+missing the russian outliers
+*/
+
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions');
+var palettes = require('users/gena/packages:palettes');
+
+var displayImage; // store as global var for brightness slider
+var myRegion; // subset of the validationFinal points for a single region
+
+var bufferRadius = 100 // extend around point for charting
+var dayInc = 7 // must be 7, this was used for the validation app so the timestamps are in 7 d increments starting 2019-07-01
+
+var glacierImage = glacierImages.mosaic()
+var glacierMask = glacierImage.unmask(0,false)
+
+var algaeMask = algaeMap.select('CLASS_PROB').mosaic().gt(threshImage).unmask(0,false)
+
+var millisInWeek = 1000*60*60*24*dayInc;
+
+var milliList = ee.List.sequence(
+  ee.Date("2019-07-01").millis(), 
+  ee.Date("2022-09-01").millis(), 
+  millisInWeek
+)
+
+// load precomputed decision trees
+var decisionTrees = myFunctions.decodeFeatureCollection(forestPath)	
+var trainedClassifier = ee.Classifier.decisionTreeEnsemble(decisionTrees).setOutputMode('raw')				
+
+// filter S2 images for a given roi, generate weekly mosaics
+var getImages = function(roi){
+  var myS2= myFunctions.filterS2ForAlgae({
+    roi: roi,
+    maxCloudCover: 40,
+    minSnowPercent: 0.5, 
+    maxSZA: 65
+  });
+
+  var weeklyMosaics = ee.ImageCollection.fromImages(
+    milliList.map(function (milli) {
+      var date = ee.Date(milli);
+      var images = myS2
+        .filterBounds(roi.buffer(1000, 500)) // mosaic within a sloppy 1k buffer of the point
+        .filterDate(date, date.advance(dayInc,'day')) 
+        .sort('CLOUDY_PIXEL_PERCENTAGE'); // clear images will be on top
+      
+      var dateProperties = {
+          'date': date.format("YYYY-MM-dd"), 
+          'system:time_start':milli
+        };
+      // if there are images in the specified date range, add the mosaic to the collection, 
+      return ee.Algorithms.If(images.size().neq(0), images.mosaic().set(dateProperties));
+  })).map(function(i){return i.set('index',i.get('system:index'))}); // add an index for counting (not reccommended to use system properties)
+  
+  
+  var classifiedMosaics = weeklyMosaics.map(function(image){
+    var plusNDs = myFunctions.addNormalizedBands(image);
+    var redMask = myFunctions.redSnowMask(plusNDs); // pre-processing step, mask non-red snow
+    var maskedImage = plusNDs.updateMask(redMask).updateMask(glacierMask); 
+    // using precomputed decision trees
+    var raw = maskedImage.classify(trainedClassifier, 'raw');
+    var probability = raw.arrayReduce(ee.Reducer.mean(), ee.List([0])).arrayGet(0)
+    // var probUnmasked = probability.unmask().rename('CLASS_PROB_UNMASKED'); // for Chart, so you can click on most dates
+    var classification = probability.gt(threshImage); // masked by RGND, a binary image
+    var classMask = classification.unmask(0, false)
+    
+    // rgnd, replaced with 0 at all non algae locations
+    var rgnd = maskedImage.select('RGND')
+      .updateMask(classMask)
+      .unmask(0)
+    
+    return image.addBands(rgnd.rename('SRI'))
+      .addBands(probability.rename('CLASS_PROB'))
+  })
+
+  return classifiedMosaics;
+}
+
+
+// UI functions  -------------------------
+
+// point selector callback
+function refreshImage(x, collection){
+  slider.setValue(11000, false); // refresh the slider value
+  dateLabel.setValue("loading...")
+  // update global variable, store to allow slider use
+  displayImage = ee.Image(collection
+    .filter(ee.Filter.eq('system:time_start', x))  
+    .first());
+
+  // use evaluate to allow date annotation of layer name
+  var date = ee.Date(displayImage.get('date'));
+  date.format('YYYY-MM-dd').evaluate(function(clientDate){
+    Map.layers().set(3, ui.Map.Layer(displayImage, myFunctions.rgbVisParam, "true-color " + clientDate)); 
+    Map.layers().set(4, ui.Map.Layer(displayImage.select('CLASS_PROB'), 
+                                    myFunctions.classVisParam, "probability " + clientDate, false));
+    dateLabel.setValue(clientDate)
+  })
+}
+
+// chart click callback
+function refreshImageWrap(collection){
+  var wrap = function(x, y, series){
+    slider.setValue(11000, false); // refresh the slider value
+  
+    // update global variable, store to allow slider use
+    displayImage = ee.Image(collection
+      .filter(ee.Filter.eq('system:time_start', x))  
+      .first());
+
+    // use evaluate to allow date annotation of layer name
+    var date = ee.Date(displayImage.get('date'));
+    date.format('YYYY-MM-dd').evaluate(function(clientDate){
+      Map.layers().set(3, ui.Map.Layer(displayImage, myFunctions.rgbVisParam, "true-color " + clientDate)); 
+      Map.layers().set(4, ui.Map.Layer(displayImage.select('CLASS_PROB'), 
+                                      myFunctions.classVisParam, "probability " + clientDate, false));
+      dateLabel.setValue(clientDate)
+    })
+  }
+  return wrap
+}
+
+var chartStyle = {
+  title: 'Watermelon snow redness in green box (click date to load image)',
+  hAxis: {
+    title: 'Date',
+    titleTextStyle: {italic: false, bold: true},
+    gridlines: {color: 'FFFFFF'}
+  },
+  vAxis: {
+    title: 'Watermelon snow redness index',
+    fontSize: '7px'
+  },
+  chartArea: {backgroundColor: 'EBEBEB'}
+};
+
+// generate a time series chart of algae in roi
+function refreshChart(roi){
+  var myImages = getImages(roi)
+  
+  var chart = ui.Chart.image.series({
+    imageCollection: myImages.select('SRI'),
+    region: roi.buffer(bufferRadius),
+    reducer: ee.Reducer.mean(),
+    scale: 50
+  }).setOptions(chartStyle);
+  chart.onClick(refreshImageWrap(myImages)); // register a callback
+  panel.widgets().set(11, chart); // update the chart layer
+}
+
+// master function to do stuff for a point feature
+function refreshForPoint(feature){
+  var ptGeom = feature.geometry(2) // error < 2 m to hit the right grid cell
+  var gridCell = ptGeom.coveringGrid('EPSG:4326', 50)
+  
+  // update labels on panel
+  feature.getString("truth_chr").evaluate(function(truth){truthLabel.setValue(truth)})
+  feature.get('class_rf1').evaluate(function(pred){predLabel.setValue(String(pred))})
+
+  // zoom map to point
+  Map.layers().set(5, 
+    ui.Map.Layer( ee.FeatureCollection(gridCell).style({color:"green", fillColor:"#00000000"}), {},"Chart location"))
+  Map.centerObject(feature, 15)
+  
+  // refresh display image using feature date value
+  var myMillis = ee.Date(feature.getString('date')).millis()
+  var myImages = getImages(ptGeom)
+  refreshImage(myMillis, myImages)
+  
+  // refresh timeseries chart
+  refreshChart(ptGeom)
+}
+
+// wrapper to get a point given a region and ID
+function refreshForPointWrap(id){
+  id = Number(id)
+
+  var myPoint = validationFinal
+    .filter(ee.Filter.eq('region', myRegion))
+    .filter(ee.Filter.eq('region_pt_id',id)).first()
+    
+  refreshForPoint(myPoint)
+}
+
+
+// update the point index counter in panel 
+// on click, triggers refreshChartForRandomPointId()
+function shiftPt(increment){
+  var currentIndex = randomPtIndexTextbox.getValue();
+  var newIndex = Number(currentIndex) + increment; // advance or subtract the counter
+  randomPtIndexTextbox.setValue(String(newIndex)); // triggers refresh chart
+}
+
+// wrappers for shiftPt used by forward and advance buttons
+function shiftUp(){shiftPt(1)} 
+function shiftDown(){shiftPt(-1)}
+
+// called by slider, allow user to adjust image darkness
+function updateBrightness(val){
+  var newRGBLayer = ui.Map.Layer(displayImage, {gamma: 0.3, min:0, max:val, bands:['B4','B3','B2']});
+  Map.layers().set(3,newRGBLayer);
+}
+
+
+
+
+
+// GUI setup ---------------------------------------------
+
+// Map GUI ---------------------------
+
+Map.setOptions('dark',{
+  'dark': [
+    { 'elementType': 'labels', 'stylers': [ { 'visibility': 'off' } ] },
+    { 'elementType': 'geometry', 'stylers': [ { 'color': '#808080' } ] },
+    { 'featureType': 'water',  'stylers': [ { 'color': '#404040' } ] }
+  ]
+})
+
+// var vir10= ee.Dictionary({ // for visualizing random points
+//   0: "#440154",
+//   1: "#482878",
+//   2: "#3e4989",
+//   3: "#31688e",
+//   4: "#26828e",
+//   5: "#1f9e89",
+//   6: "#35b779",
+//   7: "#6ece58",
+//   8: "#b5de2b",
+//   9: "#fde725" 
+// })
+
+var labelDict = ee.Dictionary({
+  0: "#8dd3c7",
+  1: "#fb8072",
+  2: "#fdb462",
+  3: "#fdb462",
+  4: "#7f7f7f"
+})
+
+validationFinal = validationFinal.map(function(f) {
+  var label = ee.Number(f.get("truth"))
+  return f.set({style: {color: labelDict.get(label) }})
+})
+
+Map.addLayer(glacierImage, {min:0, max:1}, "Glaciers")
+Map.addLayer(algaeMap.select('CLASS_PROB').mosaic().updateMask(glacierMask), {palette:palettes.matplotlib.viridis[7]}, "Probability map", false); // layer 0
+Map.addLayer(algaeMap.select('CLASS').mosaic().updateMask(glacierMask),{min:0, max:1, palette:['white','red']},"Occurrence map")
+Map.layers().set(4, ui.Map.Layer(ee.Feature(null), {}, "", false)); // placeholder layer RGB
+Map.layers().set(5, ui.Map.Layer(ee.Feature(null), {}, "", false)) // placeholder layer class prob 
+Map.layers().set(6, ui.Map.Layer(ee.Feature(null), {}, "", false)) // placeholder layer my pt
+Map.layers().set(7, ui.Map.Layer(validationFinal.style({styleProperty: "style"}), {}, "all validation pts"))
+
+Map.setCenter(-52.47, 57.04, 4)
+
+
+
+// Panel GUI ---------------------------
+
+var regionList = [
+  'northAmerica','alaskaPeninsula','alaskaRange','coastNorth',
+  'coastSouth','interiorNorth','interiorSouth','cascades',
+  'greenland','arctic',
+  'europe','iceland','norway','alps','caucasus',
+  'highMtnAsia',
+  'kamchatka',
+  'andes','antarctica','newZealand'
+]
+
+var randomPtIndexTextbox = ui.Textbox({onChange: refreshForPointWrap, style:{width: '50px'}});
+
+var regionDD = ui.Select({items:regionList, onChange: function(region){
+  myRegion = region // update global
+  
+  // call refreshPointWrap directly in case value is already 1
+  if(randomPtIndexTextbox.getValue() === "1"){
+    refreshForPointWrap("1")
+  }else{
+    // but if we were on pt 99 and switch regions, I want to update the textbox
+    randomPtIndexTextbox.setValue("1") 
+  }
+}})
+
+var randomPointRow = ui.Panel({layout: ui.Panel.Layout.flow('horizontal')})
+  .add( regionDD )
+  .add( ui.Button({label:"<",onClick:shiftDown, style:{width: '50px'} }) )
+  .add( randomPtIndexTextbox )
+  .add( ui.Button({label:">", onClick: shiftUp, style:{width: '50px'} }) );
+
+var predLabel = ui.Label("")
+var truthLabel = ui.Label("")
+
+var predVsTruthRow = ui.Panel({layout: ui.Panel.Layout.flow('horizontal')})
+  .add(ui.Label("Our label:" ))
+  .add(truthLabel)
+  .add(ui.Label("Prediction:"))
+  .add(predLabel)
+
+var searchDist = 20000;  // 20 km.
+var validationPointClickButton = ui.Button({
+  label: 'Enable zoom to validation point upon click',
+  onClick: function() {
+    Map.style().set('cursor', 'crosshair');
+    // Temporarily allow the map to listen to the mouse
+    var listenerId = Map.onClick(function(coords) {
+      myRegion = ee.Image() // temporarily set image null, so it isn't loaded by mistake
+      coords = ee.Dictionary(coords);
+      var point = ee.Geometry.Point(coords.getNumber('lon'), coords.getNumber('lat'));
+      var thisFeature = validationFinal
+        .filterBounds(point.buffer(searchDist))
+        .map(function(ft){
+          return ft.set('system:click_distance', point.distance(ft.geometry()));
+        })
+        .sort('system:click_distance').first();
+      // update the global var first
+      myRegion = thisFeature.get('region') 
+      myRegion.evaluate(function(rr){regionDD.setValue(rr)})
+      // this will automatically set the pt index value to 1
+      // so overwrite that
+      var ptId = thisFeature.get('region_pt_id')
+      // update the point textbox, triggers zoom to point
+      ptId.evaluate(function(pp){randomPtIndexTextbox.setValue(pp)})
+      Map.style().set('cursor', 'hand');
+      Map.unlisten(listenerId);
+    });
+  }
+});
+
+
+
+var dateLabel = ui.Label("no date selected"); // initialize empty date label
+
+var dateLabelRow = ui.Panel({layout: ui.Panel.Layout.flow('horizontal')})
+  .add(ui.Label("Date shown: "))
+  .add(dateLabel)
+
+var mapClickButton = ui.Button({
+  label: 'Enable chart refresh on map click',
+  onClick: function() {
+    Map.style().set('cursor', 'crosshair');
+    // Map.drawingTools().setShape('polygon')
+    // Temporarily allow the map to listen to the mouse
+    var listenerId = Map.onClick(function(coords) {
+      var point = ee.Geometry.Point(coords.lon, coords.lat);
+      var gridCell = point.coveringGrid('EPSG:4326', 50)
+      Map.layers().set(5, 
+        ui.Map.Layer( ee.FeatureCollection(gridCell).style({color:"green", fillColor:"#00000000"}), {},"Chart location"))
+      refreshChart(point);
+      Map.style().set('cursor', 'hand');
+      Map.unlisten(listenerId);
+    });
+  }
+});
+
+var slider = ui.Slider({
+  min: 7000,
+  max:12000,
+  value:11000,
+  step:500,
+  onChange:updateBrightness,
+  style:{width:'400px'}
+})
+
+var panel = ui.Panel({style: {width: '500px'}})
+  .insert(0, ui.Label({
+      value: "Watermelon snow on glaciers",
+      style: {fontSize: '24px', color: '000000'}
+    }))
+  .insert(1, ui.Label(
+      "In summer, unicellular algal blooms known as watermelon snow form \
+      on alpine and polar snowfields, darkening the snow surface and \
+      increasing snowmelt. Explore the map to see when and where blooms \
+      occur. For more information, please see: \
+      Engstrom and Quarmby (in review) Satellite mapping of watermelon \
+        snow on Earth’s glaciers"))
+  .insert(2, ui.Label(""))
+  .insert(3, ui.Label({
+      value: "View pre-loaded validation points:",
+      style: {fontSize: '18px', color: '000000'}
+  }))
+  .insert(4, ui.Label("Points numbered from highest (#1) to lowest watermelon snow probability"))
+  .insert(5, randomPointRow) 
+  .insert(6, predVsTruthRow)
+  .insert(7, validationPointClickButton)
+  .insert(8, ui.Label(""))
+  .insert(9, ui.Label({
+    value: "Explore the map:",
+    style: {fontSize: '18px', color: '000000'}
+  }))
+  .insert(10, mapClickButton)
+  .insert(11, ui.Chart.array.values({array: [], axis: []}) ) // placeholder
+  .insert(12, dateLabelRow)
+  .insert(13, ui.Label("Adjust image darkness"))
+  .insert(14, slider)
+
+ui.root.add(panel);  
+
+
+
+
+
+// scratch --------------------
+
+// var myRedPal = [
+//   "ffffff",
+//   "ffffcc",
+//   "ffeda0",
+//   "fed976",
+//   "feb24c",
+//   "fd8d3c",
+//   "fc4e2a",
+//   "e31a1c",
+//   "bd0026",
+//   "800026" ]
+  
+  // // wrapper to displayImage at a given timestamp (ie preload from random points)
+// function showImageOnDate(millis){
+//   var date = ee.Date(millis)
+//   displayImage= myWeeklyMosaics.filterDate(date.advance(-1,'day'), date.advance(1,'day')).first()
+//   print(displayImage)
+//   showImage(displayImage)
+// }
+
+
+
+
+
+// // navigate through the imageCollection using next and prev buttons
+// function skipToImage(increment){
+//   var index = displayImage.get('index').getInfo();
+//   var newIndex = Number(index)+increment;
+//   displayImage = myWeeklyMosaics.filter(ee.Filter.eq('index',String(newIndex))).first(); // reset the global var
+//   showImageFromChart(displayImage.get('milli'));
+// }
+// // wrappers for skipToImage
+// function nextImage(){skipToImage(1)}
+// function previousImage(){skipToImage(-1)} 
+
+
+// // wrapper to automatically show the image with highest probability in ROI
+// function showBestImage(col, roi){
+//   var colPlusAlgaeProb = col.map(function(i){
+//     var meanProb = i.select('CLASS_PROB')
+//       .reduceRegion(ee.Reducer.mean(), roi, 30)
+//       .get('CLASS_PROB');
+      
+//       return i.set('meanProbAtPt',meanProb);
+//     })
+  
+//   var highestProbImage = colPlusAlgaeProb
+//     .sort('meanProbAtPt', false)
+//     .first();
+    
+//   showImage(highestProbImage.get('system:time_start'))
+// }
+
+

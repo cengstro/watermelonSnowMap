@@ -1,0 +1,388 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var dummy = /* color: #99ff99 */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "dummy": "dummy",
+          "system:index": "0"
+        }),
+    algae = /* color: #ff0000 */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 1,
+          "system:index": "0"
+        }),
+    localDust = /* color: #0b4a8b */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 2,
+          "system:index": "0"
+        }),
+    windDust = /* color: #ffc82d */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 3,
+          "system:index": "0"
+        }),
+    glare = /* color: #00ffff */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 4,
+          "system:index": "0"
+        }),
+    rainbow = /* color: #bf04c2 */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 5,
+          "system:index": "0"
+        }),
+    shadow = /* color: #ff0000 */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 6,
+          "system:index": "0"
+        }),
+    haze = /* color: #00ff00 */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 7,
+          "system:index": "0"
+        }),
+    ice = /* color: #0000ff */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 8,
+          "system:index": "0"
+        }),
+    crevasse = /* color: #999900 */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 9,
+          "system:index": "0"
+        }),
+    other = /* color: #009999 */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 10,
+          "system:index": "0"
+        }),
+    white = /* color: #ff00ff */ee.Feature(
+        ee.Geometry.MultiPoint(),
+        {
+          "class": 11,
+          "system:index": "0"
+        });
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+This script generates a max RGND composite
+in an ROI defined by Map.getCenter (buffered by 100km)
+Click on a pixel to load the true-color image
+Select area of the true-color image to sample and click 'sample' to export to drive
+
+IMPORTANT NOTES
+-when re-testing a region after using data from the last FPR test, make sure to set a new seed, otherwise test==train
+-make sure the sampling scale (getAtRes) is the same as the predAlgae native resolution, so that the sampling is representative of the area
+
+
+EXPORT FILE FORMAT (stored in my drive, in random_point_accuracy_labelled)
+underscore delim, containing 6 parts:
+1: range map, at 30 m res (unless otherwise specified in image properties)
+2: map version
+3: classification threshold, %
+4: true/false, is the map despeckled? 30*30*10 // at least 10 connected pixels (diagonals ok)
+5: ROI used to generate points (range or algae)
+6: seed to generate points within ROI 
+
+
+TO DO:
+automatically switch tool to polygon
+auto scale brightness
+on the fly despecklying annoying, cant visualize. should i preprocess this?
+make it so i can polish and sample at the same time
+automate the init drawingtools layers at start (maskRoiHere, algae, localDust etc)
+show classification at 30 m res, as it would be in the final map
+add center map on point button
+upload points as single asset, utilize pre-generated pts
+avoid out of bounds error in point changer
+dropdown to choose region
+make tighter range bounds for more filtering. (low importance)
+check if sampling res is at 30 m, what res does masking take place at? 30 i assume 
+check coverage of region. Seems to be an issue with ordering north to south
+
+Runtime: takes ~15 s for initial load. <5 s to load each new image after init run
+
+include
+*/
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions');
+var palettes = require('users/gena/packages:palettes');
+
+
+var region = 'ar'
+// AN == ANTARCTICA, PA==PATAGONIA/ANDES
+//
+var yearRange = [2019,2022]
+
+// args for collecting training data
+
+var nPtsToSample = 25 // max per class
+var minPointDist = 50 //m, ensure small sample areas are not over-represented in the training data
+var sampleRes = 2 // want to be within the selected pixel
+
+
+
+// read in the data -------------------
+
+// var glacierRegions = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/glacierRegionsV12");
+var glacierImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages/glaciers")
+
+var glacierImage = glacierImages.map(function(i){
+  return ee.Image(i.rename('glacier')) 
+}).mosaic().aside(Map.addLayer, {palette:'ffffff'},"glaciers")
+var glacierMask = glacierImage.unmask()
+
+// var rangeList = ["norway","northNorway"]
+// var myRanges = glacierRegions.filter(ee.Filter.inList('range',rangeList))
+// var rangeGeom = myRanges.geometry()
+// var myRegion = ee.Feature(myRanges.first()).get('region')
+// var glacierMask = glacierImages
+//   .filter(ee.Filter.eq('region',myRegion))
+//   .mosaic()
+//   .unmask()
+
+var dayInc = 5// 5 day sentinel flyover frequency
+var millisInDay = 1000*60*60*24
+var millisInWeek = millisInDay*dayInc; 
+var milliList = ee.List.sequence(
+  ee.Date("2019-01-01").millis(), 
+  ee.Date("2022-09-01").millis(), 
+  millisInWeek
+)
+var milliListClient = milliList.getInfo()
+
+
+
+var myS2 = myFunctions.filterS2ForAlgae({
+  roi: Map.getCenter().buffer(100000), // 100 km buffer,
+  startYear: yearRange[0],
+  endYear: yearRange[1]
+});
+print(myS2.size())
+// Create weekly mosaics. This removes redundant images for polar regions with high flyover
+// making fewer images needed to look at. Also solves the problem of points being located 
+// on the edge of an image
+var weeklyMosaics = ee.ImageCollection.fromImages(
+  milliList.map(function (milli) {
+    var date = ee.Date(milli);
+    var images = myS2
+      .filterDate(date, date.advance(dayInc,'day')) 
+      .sort('CLOUDY_PIXEL_PERCENTAGE'); // clear images will be on top
+    
+    var hrs = ee.Number(milli).divide(1000).divide(3600).toInt() // convert millis to hrs since unix epoch
+    var hrsImage = ee.Image.constant(hrs).toInt32().rename('hrs')
+    
+    var mosaic = images
+        .mosaic()
+        .addBands(hrsImage)
+        .set('hrs', hrs)
+        
+    var plusNDs = myFunctions.addNormalizedBands(mosaic);
+    var redMask = myFunctions.redSnowMask(plusNDs); // pre-processing step, mask non-red snow
+    
+    var mosaicPlus = mosaic
+      .addBands(plusNDs.select('RGND'))
+      .addBands(redMask.rename('REDMASK'))
+    
+    return ee.Algorithms.If(images.size().neq(0), mosaicPlus);
+}))
+var weeklyMosaicList = weeklyMosaics.toList(weeklyMosaics.size())
+
+var maxRgndComp = weeklyMosaics
+  .map(function(image){
+    return image.updateMask(image.select('REDMASK'))
+  })
+  .qualityMosaic('RGND')
+  .updateMask(glacierMask) // easier to do this in one step at the end
+
+var compositeLayer = ui.Map.Layer(maxRgndComp, myFunctions.rgbVisParam, "max rgnd composite")
+Map.layers().set(1, compositeLayer)
+
+var displayImage;
+var hrs;
+var date;
+var hrLabel = ui.Label("99999")
+print(hrLabel)
+var dateLabel = ui.Label("999999")
+print(dateLabel)
+// click the composite to bring up image from that date
+function getHrs(click_point){
+  hrs = ee.Number(maxRgndComp
+    .select('hrs')
+    .sampleRegions({
+      collection: click_point,
+      scale: 5
+    })
+    .first()
+    .get('hrs'))
+  
+  updateImage(hrs)
+  date = ee.Date(hrs.multiply(60*60*1000)).format('YYYY-MM-dd')
+  hrs.evaluate( function(hh){hrLabel.setValue(hh)} )
+  date.evaluate( function(dd){dateLabel.setValue(dd)} )
+  hrs = hrs.getInfo()
+}
+
+
+function updateImage(hrs){
+  // print(hrs)
+  displayImage = weeklyMosaics
+    .filter(ee.Filter.eq('hrs', hrs))
+    .first()// may be two images at same time, ok
+    .updateMask(glacierMask)
+
+  Map.layers().set(2,ui.Map.Layer(displayImage,myFunctions.rgbVisParam,"weekly true color mosaic"))
+  Map.layers().set(3,ui.Map.Layer(displayImage.select('REDMASK'),{},"redmask",false))
+  Map.layers().set(1,ui.Map.Layer(maxRgndComp, myFunctions.rgbVisParam, "max rgnd composite",false)) // hide the composite layer, slow to load
+}
+
+
+// NOT WORKING
+// gis stackex?
+// or use an indexing workaround
+var hrsInWeek = millisInWeek/(1000*60*60)
+
+function prev(){
+  hrs = Number(hrLabel.getValue())
+  // // print(hrs instanceof ee.ComputedObject) //false
+  // print(typeof hrs) // object
+  // print(typeof Number(hrs)) // number
+  // print(hrs) // component already rendered
+  hrs = hrs - hrsInWeek
+  hrLabel.setValue(String(hrs))
+  updateImage(hrs)
+  
+  var millis = hrs*60*60*1000
+  var clientDate = new Date(millis)
+  dateLabel.setValue(clientDate)
+}
+
+function next(){
+  hrs = Number(hrLabel.getValue())
+  hrs = hrs + hrsInWeek
+  hrLabel.setValue(String(hrs))
+  updateImage(hrs)
+  
+  var millis = hrs*60*60*1000
+  var clientDate = new Date(millis)
+  dateLabel.setValue(clientDate)
+}
+
+
+// assign these before first call to clearGeoms
+var drawingTools = Map.drawingTools();
+var drawnLayers = drawingTools.layers() // all layers should be present at start
+
+// utility function to clear geometries within all drawnLayers 
+function clearGeoms(){
+  for (var i = 0; i < drawnLayers.length(); i = i + 1){
+    var geoms = drawnLayers.get(i).geometries();
+    // remove all geoms in layer
+    while(geoms.length()>0){
+      geoms.remove(geoms.get(0));
+    }
+  }
+}
+
+var mapClickButton = ui.Button({
+  label: 'show image from pixel in composite',
+  onClick: function() {
+    // remove the previous images
+    Map.layers().set(2,null)
+    Map.layers().set(3,null)
+    Map.layers().set(4,null) // and points
+    Map.style().set('cursor', 'crosshair');
+    // Temporarily allow the map to listen to the mouse
+    var listenerId = Map.onClick(function(coords) {
+      var point = ee.Geometry.Point(coords.lon, coords.lat);
+      getHrs(point);
+      Map.drawingTools().setShape('polygon');
+      Map.unlisten(listenerId);
+    });
+  }
+});
+
+
+var sampleButton = ui.Button("sample", function mySample(){
+  // loop through the drawingTools.layers to make an updated feature collection
+  var list = ee.List([])
+  for(var i = 1; i<drawnLayers.length(); i=i+1){ // must create a dummy geom that occupies position 0, so I can use class=1 for algae
+    var myLayer = drawnLayers.get(i)
+    if(myLayer!==undefined){
+      var feature = ee.Feature(myLayer.toGeometry(),{'class': i}) // annotate it as the corect class
+      list = list.add(feature)// add it to the list
+    }
+  }
+  var labels = ee.FeatureCollection(list)//.aside(print)
+
+  // convert labelled vectors to image
+  var classImage = ee.Image().byte().paint(labels,'class').rename('class').selfMask()
+  
+  var classMasked = classImage.updateMask(displayImage.select('REDMASK')) 
+  
+  var sampled = displayImage
+    .select(['B1','B2','B3','B4','B5','B6','B7','B8','B8A','B9','B11','B12'])
+    .addBands(classMasked) // by adding this as a band to be sampled, masked areas will be omitted by default
+    .stratifiedSample({
+      numPoints: nPtsToSample,
+      classBand: 'class',
+      region: labels.geometry(), // must specify region for a mosaic, otherwise can't find footprint
+      seed: 0,
+      scale: sampleRes, // native resolution
+      geometries: true
+    })
+  
+  sampled = myFunctions.filterDistance(sampled, minPointDist);//Collection.geometry: Unable to perform this geometry operation. Please specify a non-zero error margin.
+  
+  Map.layers().set(4, ui.Map.Layer(sampled, {}, "sampled pts"),false) 
+  
+  // export
+  var rand = myFunctions.randomString(2) // add random identifier to each filename to avoid duplicates
+  var bounds = labels.geometry().bounds()
+  var labs = labels.filterBounds(bounds).aggregate_array('class').getInfo().toString().replace(/,/g,'')
+  var export_id = region + "_" + labs + "_" + hrs + "_" +  rand
+  
+  Export.table.toDrive({
+    collection: sampled,
+    description: export_id, 
+    folder: region,
+    fileNamePrefix: export_id
+  })
+  
+  clearGeoms(); 
+  Map.drawingTools().stop()
+})
+
+var prevButton = ui.Button("<", prev)
+var nextButton = ui.Button(">", next)
+
+
+print(mapClickButton)
+print(sampleButton);
+print(prevButton)
+print(nextButton)
+clearGeoms();
+
+// Make the background map dark.
+Map.setOptions('dark',{
+  'dark': [
+    { 'elementType': 'labels', 'stylers': [ { 'visibility': 'off' } ] },
+    { 'elementType': 'geometry', 'stylers': [ { 'color': '#808080' } ] },
+    { 'featureType': 'water',  'stylers': [ { 'color': '#404040' } ] }
+  ]
+})
+
+
+
+
+
+
+
+

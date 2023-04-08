@@ -1,0 +1,37 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var v2 = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps2/aaaatrainclean2F05"),
+    v4 = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/3_algaeMaps4/v4"),
+    trees = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/2_trainDat/trainclean2_trees");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+// rerun ak peninsula
+
+var maps = v2
+print(maps.size())
+var ll = maps.toList(maps.size())
+var i=ee.Image(ll.get(21))
+print(i)
+var fn = i.get('region').getInfo()
+
+var prob = i.select('CLASS_PROB').multiply(100).round().int8()
+var klass =i.select('CLASS').int8()
+
+var newi = prob.addBands(klass).aside(print)
+Map.addLayer(newi.select('CLASS'),{min:0, max:1, palette:['white','red']},"class band")
+Map.centerObject(newi,7)
+Export.image.toDrive({
+  image:newi, 
+  description:fn, 
+  folder:'geotiffs',
+  fileNamePrefix:fn,
+  scale:50,
+  maxPixels:1e13,
+  skipEmptyTiles: true,
+})
+
+Export.table.toDrive({
+  collection:trees,
+  description:"trees", 
+  folder:'s2_classifier_map', 
+  fileNamePrefix:"decisionTrees",
+  fileFormat:"CSV"
+})

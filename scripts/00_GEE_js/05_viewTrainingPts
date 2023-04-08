@@ -1,0 +1,128 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var trainMeta = ee.FeatureCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/2_trainDat/meta_trainclean1");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+/*
+view training data
+
+using training metadata, (csv in cloud assets)
+
+
+to do:
+some hrs not returning any images...
+*/
+var myFunctions = require('users/caseyengstrom/globalSnowAlgae:00_myFunctions');
+var palettes = require('users/gena/packages:palettes');
+
+
+var region = ['gr']
+var klass = 1
+
+var myMeta = trainMeta
+  .filter(ee.Filter.inList('region', region))
+  .filter(ee.Filter.eq('class', klass))
+
+var distinctMosaics = myMeta
+  .distinct('basename') 
+var distinctMosaicsList = distinctMosaics.toList(distinctMosaics.size())
+
+
+
+var glacierImages = ee.ImageCollection("projects/ee-caseyengstrom/assets/globalSnowAlgae/1_glacierImages/glaciers")
+
+var glacierImage = glacierImages.map(function(i){
+  return ee.Image(i.rename('glacier')) 
+}).mosaic().aside(Map.addLayer, {palette:'ffffff'},"glaciers")
+var glacierMask = glacierImage.unmask()
+var dayInc = 5
+var millisInDay = 1000*60*60*24
+var millisInWeek = millisInDay*dayInc;
+var milliList = ee.List.sequence(
+  ee.Date("2019-01-01").millis(), 
+  ee.Date("2022-09-01").millis(), 
+  millisInWeek
+)
+
+// OTF function generates mosaics
+var getMosaic = function(pt, hrs){
+  var roi = pt.buffer(1000)
+  var millis = ee.Number(hrs).multiply(60*60*1000)// convert hrs to millis
+  var date = ee.Date(millis)
+  
+  return myFunctions.filterS2ForAlgae({
+    roi: roi
+  }).filterDate(date.advance(-1,'minute'), date.advance(dayInc,'day')) 
+    .sort('CLOUDY_PIXEL_PERCENTAGE') // clear images will be on top
+    .mosaic()
+}
+
+var goToPt = function(){
+  i = Number(counter.getValue()) // reset global i from counter value
+  
+  var thisMeta = ee.Feature(distinctMosaicsList.get(i))
+  
+  // where
+  var thisBasename = thisMeta.get('basename')
+  var theseMetas = myMeta.filter(ee.Filter.eq('basename', thisBasename))
+  var thisPt = theseMetas.geometry() // show all 25 pts
+  
+  // when
+  var thisHrs = ee.Number.parse(thisMeta.get('hrs')) // might be problematic for multiple hours...
+  
+  var myMosaic = getMosaic(thisPt, thisHrs)
+  Map.layers().set(1, ui.Map.Layer(myMosaic, myFunctions.rgbVisParam, "RGB"))
+  Map.layers().set(2, ui.Map.Layer(thisPt, {color:'green'}, "pt"))
+  Map.centerObject(thisPt, 12)
+  
+  var basename = thisMeta.get('basename')
+  var class_name = thisMeta.get('class_name')
+  basename.evaluate(function(bb){basenameLabel.setValue(bb)})
+  class_name.evaluate(function(cc){classLabel.setValue(cc)})
+}
+
+var i = -1; // init
+var counter = ui.Textbox({value: i, onChange: goToPt})
+
+function shiftPt(increment){
+  i = i + increment; 
+  counter.setValue(String(i)); // changing counter triggers goToPt
+}
+
+function shiftUp(){shiftPt(1)} 
+function shiftDown(){shiftPt(-1)}
+
+
+var buttonRow = ui.Panel({layout: ui.Panel.Layout.flow('horizontal')})
+  .add( ui.Button({label:"<",onClick:shiftDown, style:{width: '50px'} }) )
+  .add( counter )
+  .add( ui.Button({label:">", onClick: shiftUp, style:{width: '50px'} }) );
+print(buttonRow)
+
+var basenameLabel = ui.Label("bn")
+var classLabel = ui.Label("klass")
+print(basenameLabel, classLabel)
+
+
+// Make the background map dark.
+Map.setOptions('dark',{
+  'dark': [
+    { 'elementType': 'labels', 'stylers': [ { 'visibility': 'off' } ] },
+    { 'elementType': 'geometry', 'stylers': [ { 'color': '#808080' } ] },
+    { 'featureType': 'water',  'stylers': [ { 'color': '#404040' } ] }
+  ]
+})
+
+
+
+
+// var morePts = trainMeta
+//   .filter(ee.Filter.inList('region', region))
+//   .filter(ee.Filter.eq('class', klass))
+//   .filter(ee.Filter.eq('basename','no1_12511_435048_T4'))
+//   .filter(ee.Filter.eq('class_name','algae'))
+//   .geometry()
+// Map.addLayer(morePts, {}, "morepts")
+
+
+
+
+
