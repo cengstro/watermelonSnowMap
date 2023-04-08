@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2" xmlns:kml="http://www.opengis.net/kml/2.2" xmlns:atom="http://www.w3.org/2005/Atom">
+<Document>
+	<name>study_sites</name>
+	<gx:CascadingStyle kml:id="__managed_style_2DB60B013A280DD13C34">
+		<Style>
+			<IconStyle>
+				<scale>1.2</scale>
+				<Icon>
+					<href>https://earth.google.com/earth/rpc/cc/icon?color=1976d2&amp;id=2000&amp;scale=4</href>
+				</Icon>
+				<hotSpot x="64" y="128" xunits="pixels" yunits="insetPixels"/>
+			</IconStyle>
+			<LabelStyle>
+			</LabelStyle>
+			<LineStyle>
+				<color>ff2dc0fb</color>
+				<width>4.8</width>
+			</LineStyle>
+			<PolyStyle>
+				<color>40ffffff</color>
+			</PolyStyle>
+			<BalloonStyle>
+				<displayMode>hide</displayMode>
+			</BalloonStyle>
+		</Style>
+	</gx:CascadingStyle>
+	<gx:CascadingStyle kml:id="__managed_style_15CD0DF6DE280DD13C34">
+		<Style>
+			<IconStyle>
+				<Icon>
+					<href>https://earth.google.com/earth/rpc/cc/icon?color=1976d2&amp;id=2000&amp;scale=4</href>
+				</Icon>
+				<hotSpot x="64" y="128" xunits="pixels" yunits="insetPixels"/>
+			</IconStyle>
+			<LabelStyle>
+			</LabelStyle>
+			<LineStyle>
+				<color>ff2dc0fb</color>
+				<width>3.2</width>
+			</LineStyle>
+			<PolyStyle>
+				<color>40ffffff</color>
+			</PolyStyle>
+			<BalloonStyle>
+				<displayMode>hide</displayMode>
+			</BalloonStyle>
+		</Style>
+	</gx:CascadingStyle>
+	<StyleMap id="__managed_style_016894C7E9280DD13C34">
+		<Pair>
+			<key>normal</key>
+			<styleUrl>#__managed_style_15CD0DF6DE280DD13C34</styleUrl>
+		</Pair>
+		<Pair>
+			<key>highlight</key>
+			<styleUrl>#__managed_style_2DB60B013A280DD13C34</styleUrl>
+		</Pair>
+	</StyleMap>
+	<Placemark id="0B8B15C941280DD13C33">
+		<name>ille</name>
+		<LookAt>
+			<longitude>-117.4260276428639</longitude>
+			<latitude>51.24089386328825</latitude>
+			<altitude>2491.851978075332</altitude>
+			<heading>0</heading>
+			<tilt>0</tilt>
+			<gx:fovy>35</gx:fovy>
+			<range>6831.272924900986</range>
+			<altitudeMode>absolute</altitudeMode>
+		</LookAt>
+		<styleUrl>#__managed_style_016894C7E9280DD13C34</styleUrl>
+		<Point>
+			<coordinates>-117.4255751439476,51.24829855417279,2645.075517399183</coordinates>
+		</Point>
+	</Placemark>
+	<Placemark id="03425F6992280DD27795">
+		<name>vowell</name>
+		<LookAt>
+			<longitude>-116.753134964239</longitude>
+			<latitude>50.77294665006612</latitude>
+			<altitude>2390.736167402008</altitude>
+			<heading>0</heading>
+			<tilt>0</tilt>
+			<gx:fovy>35</gx:fovy>
+			<range>25532.68376007211</range>
+			<altitudeMode>absolute</altitudeMode>
+		</LookAt>
+		<styleUrl>#__managed_style_016894C7E9280DD13C34</styleUrl>
+		<Point>
+			<coordinates>-116.8061209624405,50.74710117726031,2988.191211525122</coordinates>
+		</Point>
+	</Placemark>
+	<Placemark id="03E2608864280DD2AEBD">
+		<name>catamount</name>
+		<LookAt>
+			<longitude>-116.5539056488757</longitude>
+			<latitude>50.65065284356454</latitude>
+			<altitude>2313.964538191697</altitude>
+			<heading>0</heading>
+			<tilt>0</tilt>
+			<gx:fovy>35</gx:fovy>
+			<range>25609.4539026171</range>
+			<altitudeMode>absolute</altitudeMode>
+		</LookAt>
+		<styleUrl>#__managed_style_016894C7E9280DD13C34</styleUrl>
+		<Point>
+			<coordinates>-116.5635797746695,50.63408519514576,2597.938923488207</coordinates>
+		</Point>
+	</Placemark>
+	<Placemark id="04096AA5AB280DD3375E">
+		<name>weart</name>
+		<LookAt>
+			<longitude>-122.7597415486968</longitude>
+			<latitude>50.12868971553699</latitude>
+			<altitude>2276.824836035854</altitude>
+			<heading>0</heading>
+			<tilt>0</tilt>
+			<gx:fovy>35</gx:fovy>
+			<range>22080.27909568045</range>
+			<altitudeMode>absolute</altitudeMode>
+		</LookAt>
+		<styleUrl>#__managed_style_016894C7E9280DD13C34</styleUrl>
+		<Point>
+			<coordinates>-122.7641359034085,50.15148358406901,2222.466959358095</coordinates>
+		</Point>
+	</Placemark>
+	<Placemark id="00220A867A280DD3836D">
+		<name>blackcomb</name>
+		<LookAt>
+			<longitude>-122.8737902929868</longitude>
+			<latitude>50.09269716213618</latitude>
+			<altitude>2118.62397623896</altitude>
+			<heading>0</heading>
+			<tilt>0</tilt>
+			<gx:fovy>35</gx:fovy>
+			<range>2967.958349504624</range>
+			<altitudeMode>absolute</altitudeMode>
+		</LookAt>
+		<styleUrl>#__managed_style_016894C7E9280DD13C34</styleUrl>
+		<Point>
+			<coordinates>-122.8792710288772,50.09173964578132,2215.082293750829</coordinates>
+		</Point>
+	</Placemark>
+	<Placemark id="0C449E1013280DD400EA">
+		<name>brandywine</name>
+		<LookAt>
+			<longitude>-123.1958492887335</longitude>
+			<latitude>50.11051843507322</latitude>
+			<altitude>2004.017781227715</altitude>
+			<heading>8.537736462515939e-07</heading>
+			<tilt>0</tilt>
+			<gx:fovy>35</gx:fovy>
+			<range>2502.132176260056</range>
+			<altitudeMode>absolute</altitudeMode>
+		</LookAt>
+		<styleUrl>#__managed_style_016894C7E9280DD13C34</styleUrl>
+		<Point>
+			<coordinates>-123.204017136421,50.11217736863458,1822.641427437527</coordinates>
+		</Point>
+	</Placemark>
+	<Placemark id="0E625361E6280DD441C7">
+		<name>brew lake</name>
+		<LookAt>
+			<longitude>-123.1699177469418</longitude>
+			<latitude>50.03375603803888</latitude>
+			<altitude>1247.175987055758</altitude>
+			<heading>8.537736462515939e-07</heading>
+			<tilt>0</tilt>
+			<gx:fovy>35</gx:fovy>
+			<range>8329.48629781371</range>
+			<altitudeMode>absolute</altitudeMode>
+		</LookAt>
+		<styleUrl>#__managed_style_016894C7E9280DD13C34</styleUrl>
+		<Point>
+			<coordinates>-123.181821193513,50.03089417017459,1434.359482645826</coordinates>
+		</Point>
+	</Placemark>
+	<Placemark id="0CE6F455E0280DD46D47">
+		<name>tricouni</name>
+		<LookAt>
+			<longitude>-123.2336465954832</longitude>
+			<latitude>50.00308748698495</latitude>
+			<altitude>1512.057148314934</altitude>
+			<heading>0</heading>
+			<tilt>0</tilt>
+			<gx:fovy>35</gx:fovy>
+			<range>3692.146706178902</range>
+			<altitudeMode>absolute</altitudeMode>
+		</LookAt>
+		<styleUrl>#__managed_style_016894C7E9280DD13C34</styleUrl>
+		<Point>
+			<coordinates>-123.2380649439876,50.00807292941532,1627.536179186706</coordinates>
+		</Point>
+	</Placemark>
+</Document>
+</kml>

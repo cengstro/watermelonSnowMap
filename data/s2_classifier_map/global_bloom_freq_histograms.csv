@@ -1,0 +1,33 @@
+name,sbrgnOf,histogram
+caucasus,caucasus,{}
+altai,highMtnAsia,{0=8.0}
+highMtnAsia,highMtnAsia,{}
+newZealand,newZealand,{}
+antarctica,antarctica,"{1=1.0, 0=25.0}"
+antarcticaNoSheet,antarctica,"{1=1.0, 0=39.0}"
+alaskaPeninsula,northAmerica,{0=4.0}
+cascades,northAmerica,{0=23.0}
+kamchatka,kamchatka,{0=8.0}
+ellesmere,arctic,{}
+baffin,arctic,{}
+svalbard,arctic,{}
+russianArctic,arctic,{}
+iceland,europe,{}
+norwaySouth,europe,{}
+norwayNorth,europe,{}
+alps,europe,{0=9.0}
+alaskaRange,northAmerica,{}
+coastNorth,northAmerica,{}
+coastSouth,northAmerica,{0=7081.0}
+interiorNorth,northAmerica,{}
+interiorSouth,northAmerica,{0=5742.882352941177}
+brooks,northAmerica,{}
+andes,andes,"{1=18.0, 2=1.0, 0=68.0}"
+northGreenland,greenland,{}
+southwestGreenland,greenland,{}
+southeastGreenland,greenland,{}
+westCentralGreenland,greenland,{}
+eastCentralGreenland,greenland,{}
+northwestGreenland,greenland,{}
+northeastGreenland,greenland,{}
+greenlandNoSheet,greenland,{}

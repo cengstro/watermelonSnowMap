@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+<Placemark>
+  <ExtendedData>
+    <Data name='algae'>
+      <value>5391.794871566218</value>
+    </Data>
+    <Data name='region'>
+      <value>world</value>
+    </Data>
+    <Data name='glacier'>
+      <value>2717472.1559476275</value>
+    </Data>
+    <Data name='system:index'>
+      <value>0</value>
+    </Data>
+  </ExtendedData>
+  <Polygon>
+    <outerBoundaryIs>
+      <LinearRing>
+        <coordinates>-176.98839955033915,-74.01954331150233 168.07019419966085,-74.01954331150233 168.07019419966085,83.7920440877954 -176.98839955033915,83.7920440877954 -176.98839955033915,-74.01954331150233 </coordinates>
+      </LinearRing>
+    </outerBoundaryIs>
+  </Polygon>
+</Placemark>
+</Document>
+</kml>

@@ -1,0 +1,12 @@
+*.qgz
+*.tar.gz
+*.jpg
+archive/
+figs/*
+photos/*
+sat_images/*
+writing/*
+.Rproj.user
+*.Rproj
+.RData
+.Rhistory
